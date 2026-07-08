@@ -1,0 +1,29 @@
+# ============================================================
+# BitPerfect CMake 包配置文件模板
+# ============================================================
+# 职责：供其他项目通过 find_package(BitPerfect) 引用本项目的库目标
+#
+# 当其他 CMake 项目想依赖 BitPerfect 的模块时，执行：
+#   find_package(BitPerfect CONFIG REQUIRED)
+# CMake 会找到这个文件，并加载其中导出的 CMake 目标（如 BitPerfect::audio_engine）。
+#
+# 状态：P0 阶段仅生成模板文件，暂无导出目标。
+#       P1+ 阶段通过 install(EXPORT ...) 导出库目标后，本文件会包含实际的 include 指令。
+# ============================================================
+
+@PACKAGE_INIT@
+# ↑ @PACKAGE_INIT@ 是 CMake 的占位符，configure_package_config_file() 会自动替换它。
+#   它包含 find_package 的基础检查代码（如版本兼容性检测）。
+
+# --- 占位区域：P1+ 阶段在此处导入导出的 CMake 目标 ---
+# 例如：
+#   include("${CMAKE_CURRENT_LIST_DIR}/BitPerfectTargets.cmake")
+#   include("${CMAKE_CURRENT_LIST_DIR}/BitPerfectConfigVersion.cmake")
+#
+# 这样其他项目就可以这样使用：
+#   target_link_libraries(MyApp PRIVATE BitPerfect::audio_engine)
+
+# check_required_components 是 CMake 标准流程的一部分
+# 它检查用户在执行 find_package 时是否指定了 REQUIRED 关键字
+# 如果指定了但找到的包不完整，会给出友好的错误提示
+check_required_components(BitPerfect)

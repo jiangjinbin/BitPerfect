@@ -1,0 +1,121 @@
+# ============================================================
+# BitPerfect 项目 clang-format 配置文件
+# ============================================================
+# 用途：定义代码格式化规则，供 clang-format 工具和 IDE 插件使用。
+#
+# 什么是 clang-format？
+#   - 它是 LLVM 项目提供的 C++ 代码格式化工具
+#   - 可以自动将代码调整为统一的代码风格（缩进、换行、空格等）
+#   - VS Code（安装 clangd 插件）、CLion、Qt Creator 等 IDE 会自动检测此文件
+#   - 命令行使用：clang-format -i <file>  （-i 表示直接修改文件）
+#
+# 配置原则：
+#   - 严格遵守 C++编码规范.md 第七章"控制流与格式"
+#   - K&R 大括号风格（开括号不换行，与 Java 风格一致）
+#   - 4 空格缩进
+#   - 每行最大 120 字符
+#   - 不自动排序 include（编码规范有明确的 include 分组规则）
+#   - 不自动重新排版注释（中文注释会被破坏）
+#
+# 本文件放置位置：项目根目录（与 CMakeLists.txt 同级）
+# ============================================================
+
+# 基础风格：基于 LLVM 风格（Chromium、Mozilla、LLVM、Google 等预设之一）
+# LLVM 风格的特点：2 空格缩进、大括号在行尾、指针靠左、宽列限制
+# 我们在下面覆盖默认值以匹配 C++ 编码规范
+BasedOnStyle: LLVM
+
+# --- 缩进 ---
+# 使用 4 个空格缩进（编码规范要求，而非 LLVM 默认的 2 空格）
+
+IndentWidth: 4                         # 每个缩进层级 = 4 个空格
+TabWidth: 4                            # Tab 字符的显示宽度（如果文件中出现 Tab 的话）
+UseTab: Never                          # Never 表示绝不用 Tab 字符，全部用空格缩进
+IndentCaseLabels: false                # switch 下的 case 标签不额外缩进一层
+                                       # 示例：
+                                       # switch (x) {
+                                       # case 1:    ← 与 switch 对齐（false）
+                                       #     break;
+                                       # }
+
+# --- 大括号换行规则 ---
+# 使用自定义大括号风格：K&R 风格（与 Java 一致，开括号不换行）
+
+BreakBeforeBraces: Custom              # 自定义控制各类大括号的换行行为
+BraceWrapping:
+  AfterClass: false                   # class Foo {  ← 左花括号不换行
+  AfterControlStatement: Never        # if (x) {     ← 永不换行
+  AfterEnum: false                    # enum X {      ← 不换行
+  AfterFunction: false                # void foo() {  ← 不换行
+  AfterNamespace: false               # namespace bp { ← 不换行
+  AfterStruct: false                  # struct Foo {  ← 不换行
+  AfterUnion: false                   # union U {     ← 不换行
+  BeforeCatch: false                  # } catch (...) { ← catch 不换行
+  BeforeElse: false                   # } else {      ← else 不换行
+
+# --- 空格 ---
+# 控制各类括号和语句之间的空格
+
+# ControlStatements: 仅在 if/for/while/switch 等控制语句后加空格
+# 示例：if (x)  ← if 和 ( 之间有空格
+#       foo(x)  ← 函数调用括号前不加空格
+SpaceBeforeParens: ControlStatements
+
+# 圆括号内部不加空格
+# 示例：foo(a, b)  而非 foo( a, b )
+SpacesInParentheses: false
+
+# 方括号内部不加空格
+# 示例：arr[0]     而非 arr[ 0 ]
+SpacesInSquareBrackets: false
+
+# C 风格类型转换后加空格（虽然编码规范禁止 C 风格转换，但此处作为防御性设置）
+# 示例：(int) x     而非 (int)x
+SpaceAfterCStyleCast: true
+
+# --- 列宽限制 ---
+# 单行最大 120 字符（编码规范要求，与 LLVM 默认的 80 不同）
+# 超过此宽度时 clang-format 会自动换行
+
+ColumnLimit: 120
+
+# 函数返回类型不自动换行（LLVM 默认会将长返回类型的函数强制换行）
+AlwaysBreakAfterReturnType: None
+
+# 不允许短函数写在一行（即使是单行函数体也必须展开为多行）
+# 目的：保持一致的函数布局，方便在函数内设置断点
+AllowShortFunctionsOnASingleLine: None
+
+# 不允许 if 语句写在一行
+# 示例：if (x) return;  ← 会被自动展开为两行
+AllowShortIfStatementsOnASingleLine: Never
+
+# 不允许循环（for/while）写在一行
+AllowShortLoopsOnASingleLine: false
+
+# --- 指针和引用的对齐 ---
+# 星号（*）和引用号（&）靠左侧（类型名前，而非变量名前）
+# 示例：int* ptr      （而非 int *ptr）
+#       const std::string& name   （而非 const std::string &name）
+
+PointerAlignment: Left                # int* p;  ← 星号靠左
+ReferenceAlignment: Left              # int& r;  ← 引用号靠左
+
+# --- 注释 ---
+# 不自动重新排版注释行
+# 原因：中文注释由方块汉字组成，clang-format 不理解中文词边界，
+#       自动重排会破坏注释结构
+
+ReflowComments: false
+
+# --- 头文件排序 ---
+# 不自动排序 #include 指令
+# 原因：C++ 编码规范有明确的 include 分组规则（标准库 → 第三方 → 项目），
+#       clang-format 不了解这个分组逻辑，排序会打乱组织
+
+SortIncludes: false
+
+# --- 空行 ---
+# 连续空行最多保留 1 行（多余的空行会被自动删除）
+
+MaxEmptyLinesToKeep: 1

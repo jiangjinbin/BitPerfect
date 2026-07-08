@@ -1,0 +1,78 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 22,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "debug",
+      "displayName": "Debug 构建",
+      "description": "开发调试版本：启用 Address Sanitizer、Undefined Behavior Sanitizer、调试符号、线程断言（BP_DEBUG 宏）",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release 构建",
+      "description": "正式发布版本：编译器优化全开（-O3）、去除调试符号、去除 BP_DEBUG 宏和 sanitizer",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "ci",
+      "displayName": "CI 构建",
+      "description": "持续集成环境：Release 模式 + 严格警告为错误（-Werror）+ 启用所有测试",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/ci",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "ENABLE_TESTING": "ON",
+        "WARNINGS_AS_ERRORS": "ON"
+      }
+    },
+    {
+      "name": "xcode-debug",
+      "displayName": "Xcode 项目（Debug）",
+      "description": "生成 Xcode 工程文件（.xcodeproj），方便在 Xcode 中调试、查看调用栈、使用 Instruments 性能分析",
+      "generator": "Xcode",
+      "binaryDir": "${sourceDir}/build/xcode-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "debug",
+      "configurePreset": "debug",
+      "description": "使用 Ninja 编译 Debug 版本（地址消毒器 + 未定义行为消毒器）"
+    },
+    {
+      "name": "release",
+      "configurePreset": "release",
+      "description": "使用 Ninja 编译 Release 版本（优化全开）"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "debug",
+      "configurePreset": "debug",
+      "description": "运行所有 Catch2 测试（Debug 模式，通过 CTest）",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}
