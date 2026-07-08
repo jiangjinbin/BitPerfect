@@ -1,9 +1,11 @@
 # BitPerfect C++ 编码规范
 
-> 版本：v1.2 | 日期：2026-07-09
+> 版本：v1.3 | 日期：2026-07-09
 >
 > 本文档是 BitPerfect 项目的 C++ 代码编写标准，所有开发者及 AI 编码助手必须遵守。
 > 目标：保证代码风格统一、可读性优先、降低维护成本。
+>
+> **v1.3 变更**：文件名命名规范从 snake_case 改为 PascalCase（与主类名一致，对齐 LLVM/JUCE 风格）。
 
 ---
 
@@ -11,10 +13,10 @@
 
 ### 1.1 文件命名
 
-- **头文件**：`snake_case.h`（如 `audio_engine.h`、`config_store.h`）
-- **源文件**：`snake_case.cpp`（如 `audio_engine.cpp`、`config_store.cpp`）
-- **测试文件**：`test_<模块名>.cpp`（如 `test_audio_engine.cpp`）
-- **Objective-C++ 文件**：`snake_case.mm`（如 `core_audio_helper.mm`）
+- **头文件**：`PascalCase.h`（如 `AudioEngine.h`、`ConfigStore.h`），文件名与主类名一致
+- **源文件**：`PascalCase.cpp`（如 `AudioEngine.cpp`、`ConfigStore.cpp`），文件名与主类名一致
+- **测试文件**：`Test<模块名>.cpp`（如 `TestAudioEngine.cpp`）
+- **Objective-C++ 文件**：`PascalCase.mm`（如 `CoreAudioHelper.mm`）
 
 ### 1.2 目录结构
 
@@ -223,7 +225,7 @@ void someFunction() {
 | 枚举值 | PascalCase | `State::Playing`, `PlayMode::Shuffle` |
 | 宏 | UPPER_SNAKE_CASE | `BP_ASSERT_MESSAGE_THREAD()` |
 | 命名空间 | snake_case | `platform_utils`, `core_audio_helper` |
-| 文件名 | snake_case | `audio_engine.h`, `config_store.cpp` |
+| 文件名 | PascalCase | `AudioEngine.h`, `ConfigStore.cpp` |
 | 目录名 | snake_case | `audio_engine/`, `main_window/` |
 | 变量初始化 | `=` 优先，默认构造例外 | `int x = 0;` 优于 `int x(0);` |
 
@@ -1344,4 +1346,4 @@ void Example::internalHelper() {
 
 ---
 
-> 最后更新：2026-07-09（v1.2：3.6 收紧 —— explicit 构造函数也必须用 = 语法）
+> 最后更新：2026-07-09（v1.3：1.1 文件名规范从 snake_case 改为 PascalCase，与类名一致）
