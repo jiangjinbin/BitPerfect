@@ -1,6 +1,6 @@
 # BitPerfect C++ 编码规范
 
-> 版本：v1.0 | 日期：2026-07-08
+> 版本：v1.2 | 日期：2026-07-09
 >
 > 本文档是 BitPerfect 项目的 C++ 代码编写标准，所有开发者及 AI 编码助手必须遵守。
 > 目标：保证代码风格统一、可读性优先、降低维护成本。
@@ -225,6 +225,7 @@ void someFunction() {
 | 命名空间 | snake_case | `platform_utils`, `core_audio_helper` |
 | 文件名 | snake_case | `audio_engine.h`, `config_store.cpp` |
 | 目录名 | snake_case | `audio_engine/`, `main_window/` |
+| 变量初始化 | `=` 优先，默认构造例外 | `int x = 0;` 优于 `int x(0);` |
 
 ---
 
@@ -314,6 +315,43 @@ int state_value = static_cast<int>(State::Playing);
 // ❌ 禁止：传统 enum，值污染外部作用域
 enum State { Stopped, Playing, Paused, Seeking };  // Stopped/Playing 等直接暴露
 ```
+
+### 3.6 变量初始化风格
+
+**变量初始化优先使用 `=` 语法（拷贝初始化），不使用括号 `()` 语法（直接初始化）。**
+
+```cpp
+// ✅ 写法 A（推荐）：= 赋值风格，一目了然"右边创建对象，赋给左边变量"
+juce::String device_name = "Built-in Output";
+juce::File config_file = juce::File("/path/to/config.json");
+std::unique_ptr<AudioDecoder> decoder = std::make_unique<AudioDecoder>();
+int num_channels = 2;
+double sample_rate = 44100.0;
+
+// ✅ 写法 B：允许但仅用于以下场景 ——
+//         场景 1：默认构造（无法用 = 表达）
+AudioDecoder decoder;               // 默认构造，没有等号写法
+FileInfo info;                       // 同上
+std::string text;                    // 同上
+
+//         注意：即使构造函数带 explicit 修饰，也可以通过显式写出类型名来使用 =：
+//              std::unique_ptr<T> p = std::unique_ptr<T>(raw_pointer);  // explicit 构造也能用 =，重复类型名即可
+
+// ❌ 禁止写法：能用 = 却用括号
+juce::String device_name("Built-in Output");   // 禁止，应改用 =
+juce::File config_file("/path/to/config.json"); // 禁止，应改用 =
+int num_channels(2);                            // 禁止，应改用 =
+	std::unique_ptr<T> reader(raw_pointer);          // 禁止，应改用 = std::unique_ptr<T>(raw_pointer)
+```
+
+**理由**：
+
+1. **对 Java 开发者友好**：`=` 语法和 Java 的对象赋值视觉一致，降低新手认知负担
+2. **避免 "most vexing parse"**：C++ 的括号初始化 `T x(arg)` 在某些情况下会被编译器误解析为函数声明，而 `T x = arg` 永远不会
+3. **零开销**：C++17 起强制拷贝省略（mandatory copy elision），`=` 和 `()` 编译结果完全相同，不存在性能差异
+4. **编码规范一致性**：项目中 `=` 语法已在 `std::make_unique` 等场景广泛使用，统一风格减少二义性
+
+> **唯一例外**：默认构造（无参数）无法用 `=` 表达，此时直接写 `T x;` 即可。
 
 ---
 
@@ -1189,6 +1227,7 @@ TEST_CASE("获取当前采样率返回默认值 44100", "[AudioEngine]") {
 | `typedef` | `using` 别名声明 |
 | 传统 `enum`（非 class） | `enum class` 强类型枚举 |
 | `auto` 类型推导 | 显式类型声明 |
+| `()` 风格变量初始化（可用 `=` 替代时） | `=` 风格变量初始化 |
 | trailing return type | 传统前置返回类型 |
 | 省略大括号的单行语句 | 始终使用大括号 |
 | `file(GLOB ...)`（CMake 中） | 显式列出源文件 |
@@ -1305,4 +1344,4 @@ void Example::internalHelper() {
 
 ---
 
-> 最后更新：2026-07-08
+> 最后更新：2026-07-09（v1.2：3.6 收紧 —— explicit 构造函数也必须用 = 语法）
