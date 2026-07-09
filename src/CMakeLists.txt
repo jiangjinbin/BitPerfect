@@ -109,6 +109,9 @@ target_link_libraries(BitPerfectCli PRIVATE
     nlohmann_json                       # JSON 解析库：一行代码即可解析/生成 JSON 字符串
     sqlite3                             # 嵌入式数据库：P2 阶段用于存储音乐元数据索引，
                                         #              P0 提前链接确保集成正常
+    Threads::Threads                    # 系统线程库：提供 -pthread 链接标志（Linux 必须），
+                                        #              macOS 自动委托给 libSystem（无额外标志）
+                                        #              AudioDecoder 在 startDecoding/stopDecoding 中使用 std::thread
 )
 
 # ============================================================

@@ -24,10 +24,11 @@ BitPerfect —— 跨平台（macOS / Linux / Windows）本地音乐播放器，
 2.2.7 实现 decodingLoop() 方法 ✅（约 130 行，6 步流程：获取常量 → while(running_) 循环读取 → reader_->read() 解码一帧 → prepareToWrite + 逐声道 memcpy 写入 fifo_buffer_ → finishedWrite 通知 → 更新位置。修正原 TODO 三处 API 差异：read() 需 6 个参数补全 useReaderRightChan、返回值是 bool 不能用 <=0 判断 EOF（改用 read_position >= total_frames 手动追踪）、reader_ 基类无 getPosition() 方法（改用局部变量）。Fifo 满时阻塞等待 + running_ 检查。两级 try/catch 异常保护。同步提前实现 getFifo()/isDecodingComplete()/getDecodedPosition() 三个 getter（原属 2.2.9，均为单行原子操作，端到端测试必需）。CLI 端到端验证通过：渡口.wav 9,878,988 采样帧全部解码，Fifo 消费帧数一致）。
 2.2.8 实现 seekTo() 方法 ✅（约 40 行，4 步流程：越界检查 → stopDecoding() → current_position_.store() → startDecoding()。发现并修正了原始 TODO 中 3 处冲突：① reader_->setPosition() 不存在（JUCE 基类无此方法，改为通过 current_position_ 原子变量传递目标位置到 decodingLoop()）、② startDecoding() 无条件重置 current_position_ 为 0（改为保持当前值不变）、③ decodingLoop() 硬编码 read_position = 0（改为 current_position_.load() 读取起始位置）。CLI 端到端 6 项验证通过：越界检查（负数/超范围静默忽略）、seek 到 1 秒处、seek 到文件末尾 EOF 立即触发、幂等性）。
 2.2.10 实现 Listener 管理方法 ✅（约 10 行，addListener() 调用 listeners_.add() / removeListener() 调用 listeners_.remove()。P0 阶段仅管理列表，不触发回调。CLI 验证 6 项通过：添加 / 重复添加 / 移除 / 移除不存在项 / 重新添加 / P0 无回调。编译零错误零警告）。
+2.2.11 更新 CMake 构建系统 ✅（修改 4 个文件：① decoder/CMakeLists.txt 注释从"待完成"更新为当前状态；② 根 CMakeLists.txt 新增 find_package(Threads REQUIRED)；③ src/CMakeLists.txt 链接 Threads::Threads；④ tests/CMakeLists.txt 新增解码器源文件 + 4 个 JUCE 模块 + Threads::Threads，为 2.2.14 单元测试做好准备。编译 0 错误 0 警告，CLI 端到端 7 项验证全通过）。
 
 **开发者学习**：✅ 全部完成（C++、音频基础、JUCE、CMake、辅助库、Git，共 29 章，目录见 `项目规划/学习手册/00-目录与学习路线.md`）。
 
-**下一步**：2.2.11 更新 CMake 构建系统（完善 decoder/CMakeLists.txt + 添加库链接）。2.2.9 三个 getter 已提前完成（2.2.7 端到端测试需要）。2.2 阶段共 14 个子步骤（2.2.1 ✅ → 2.2.2 ✅ → 2.2.3 ✅ → 2.2.4 ✅ → 2.2.5 ✅ → 2.2.6 ✅ → 2.2.7 ✅ → 2.2.8 ✅ → 2.2.10 ✅ → ... → 2.2.14），详见 `项目规划/项目进度.md`。
+**下一步**：2.2.12 更新 CLI 测试程序（当前 main.cpp 已含完整端到端验证，可能仅需整理独立化） + 2.2.14 编写单元测试（test_audio_decoder.cpp，6 个测试用例）。2.2.9 三个 getter 已提前完成（2.2.7 端到端测试需要）。2.2.13 测试音频文件已准备完毕 ✅。2.2 阶段共 14 个子步骤（2.2.1 ✅ → 2.2.2 ✅ → 2.2.3 ✅ → 2.2.4 ✅ → 2.2.5 ✅ → 2.2.6 ✅ → 2.2.7 ✅ → 2.2.8 ✅ → 2.2.10 ✅ → 2.2.11 ✅ → ... → 2.2.14），详见 `项目规划/项目进度.md`。
 
 **功能优先级**：P0 核心验证（CLI 验证 Float + Integer 双路径，证明 bit-perfect 可行）→ P1 基础播放器（带 UI 的 MVP）→ P2 音乐管理（曲库 + 数据库）→ P3 体验增强与发布 → P4 未来扩展（跨平台 + 高级功能）。详见 `项目规划/需求分析.md` 第二章。
 

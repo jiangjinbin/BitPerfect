@@ -117,6 +117,21 @@ add_compile_definitions(
 #   2. INTERFACE 库：纯头文件库（nlohmann/json）
 #   3. 直接编译源文件：无 CMakeLists.txt 的库（sqlite3）
 
+# ============================================================
+# 系统级依赖：线程库（std::thread 跨平台支持）
+# ============================================================
+# find_package(Threads) 是 CMake 内置模块，自动处理平台差异：
+#   - macOS：pthread 已内置于系统 libSystem，无需额外链接标志
+#   - Linux：需要 -pthread 编译和链接标志（gcc/clang）
+#   - Windows：自动选择正确的线程库
+#
+# REQUIRED 关键字：如果找不到线程库（极端异常情况），CMake 配置阶段直接报错，
+# 避免编译到一半才发现链接失败
+#
+# AudioDecoder 在 startDecoding()/stopDecoding() 中使用 std::thread
+# 创建和 join 解码线程，需要线程库支持
+find_package(Threads REQUIRED)
+
 # --- JUCE 音频应用框架 ---
 # JUCE（Jules' Utility Class Extensions）是一个跨平台 C++ 音频应用框架，
 # 提供音频 I/O、GUI、文件处理等模块。P0 阶段仅使用 juce_core 核心模块

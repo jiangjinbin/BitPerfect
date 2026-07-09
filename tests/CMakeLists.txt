@@ -79,16 +79,37 @@ if(BP_TEST_COUNT GREATER 0)
     # Catch2::Catch2WithMain 自带 main 函数，我们不需要自己写 main
     add_executable(BitPerfectTests ${BP_TEST_SOURCES})
 
+    # ============================================================
+    # 添加领域层源文件（测试需要直接编译被测试的业务代码）
+    # ============================================================
+    # BP_DOMAIN_SOURCES 在 src/domain/CMakeLists.txt 中通过 PARENT_SCOPE
+    # 回传到 src/CMakeLists.txt，不会自动传递到本文件（tests/ 和 src/ 是同级目录）。
+    # 因此需要用绝对路径直接引用需要编译的源文件。
+    #
+    # AudioDecoder.cpp —— 2.2.14 test_audio_decoder.cpp 的测试对象
+    target_sources(BitPerfectTests PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/domain/decoder/AudioDecoder.cpp
+    )
+
     # 链接测试框架和第三方库
     # Catch2::Catch2WithMain：Catch2 测试框架 + 自动生成的 main 函数
+    # juce_core / juce_audio_basics / juce_audio_formats / juce_events：
+    #   AudioDecoder 依赖的 JUCE 模块，测试被编译为独立的可执行文件，
+    #   不受 BitPerfectCli 链接关系的影响，必须显式声明
+    # Threads::Threads：系统线程库，AudioDecoder 使用 std::thread
     # spdlog::spdlog：测试中可以用日志输出调试信息
     # nlohmann_json：测试 JSON 配置解析时使用
     # sqlite3：测试数据库封装时使用
     target_link_libraries(BitPerfectTests PRIVATE
         Catch2::Catch2WithMain
+        juce_core                           # JUCE 核心模块（juce::String、juce::AbstractFifo 等）
+        juce_audio_basics                   # JUCE 音频基础模块（juce::AudioBuffer<float>）
+        juce_audio_formats                  # JUCE 音频格式模块（juce::AudioFormatReader）
+        juce_events                         # JUCE 事件模块（juce::ListenerList）
         spdlog::spdlog
         nlohmann_json
         sqlite3
+        Threads::Threads                    # 系统线程库（Linux 需要 -pthread）
     )
 
     # 添加 src/ 到 include 路径，让测试代码可以这样引用：
