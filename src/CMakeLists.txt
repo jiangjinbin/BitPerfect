@@ -77,6 +77,14 @@ add_executable(BitPerfectCli
 )
 
 # ============================================================
+# 3.5 将领域层源文件加入构建目标
+# ============================================================
+# add_subdirectory(domain) 通过 PARENT_SCOPE 将解码器等模块的源文件
+# 汇总到 BP_DOMAIN_SOURCES 变量。通过 target_sources 将这些文件
+# 加入可执行目标的编译列表，使它们参与编译和链接。
+target_sources(BitPerfectCli PRIVATE ${BP_DOMAIN_SOURCES})
+
+# ============================================================
 # 4. 链接第三方库
 # ============================================================
 # target_link_libraries 分为三种链接范围：
@@ -89,7 +97,13 @@ add_executable(BitPerfectCli
 
 target_link_libraries(BitPerfectCli PRIVATE
     juce_core                           # JUCE 核心模块：提供 juce::String、juce::File、
-                                        #               juce::Thread 等基础类
+                                        #               juce::Thread、juce::AbstractFifo 等基础类
+    juce_audio_basics                   # JUCE 音频基础模块：提供 juce::AudioBuffer<float>
+                                        #               AudioDecoder 用于单帧解码临时缓冲
+    juce_audio_formats                  # JUCE 音频格式模块：提供 juce::AudioFormatManager、
+                                        #               juce::AudioFormatReader，用于音频文件解析
+    juce_events                         # JUCE 事件模块：提供 juce::ListenerList，
+                                        #               AudioDecoder 用于管理 Listener 列表
     spdlog::spdlog                      # 日志输出库：比 std::cout 更强大，支持多级日志、
                                         #             彩色输出、线程安全、异步日志
     nlohmann_json                       # JSON 解析库：一行代码即可解析/生成 JSON 字符串

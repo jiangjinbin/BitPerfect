@@ -47,12 +47,10 @@ set(AUDIO_ENGINE_SOURCES "")
 #   - 输出：Float32 PCM（-1.0 ~ +1.0，样本值归一化为浮点）
 #   - 解码运行在后台线程，不阻塞音频回调
 #
-# P0 阶段暂无源码，P1 取消下面注释：
-# set(DECODER_SOURCES
-#     domain/decoder/AudioDecoder.h
-#     domain/decoder/AudioDecoder.cpp
-# )
-set(DECODER_SOURCES "")
+# decoder 模块有独立子目录和 CMakeLists.txt（2.2.1 创建），
+# 源文件在 domain/decoder/CMakeLists.txt 中声明，通过 PARENT_SCOPE
+# 将 DECODER_SOURCES 回传到本文件作用域。
+add_subdirectory(decoder)
 
 # ============================================================
 # Models 模块 —— 数据模型

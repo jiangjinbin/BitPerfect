@@ -17,6 +17,8 @@
  * 运行方式：./build/debug/src/BitPerfectCli
  * 预期输出：5 个 ✅ 验证通过信息，返回码 0
  *
+ * 测试控制：在 main() 函数中注释掉不需要的测试调用即可跳过。
+ *
  * 所属模块：src/cli（P0 CLI 程序入口，P1 将被 src/main.cpp GUI 入口取代）
  */
 
@@ -60,33 +62,43 @@
                               // EXIT_FAILURE = 1（程序异常退出）
 
 
+// ============================================================
+// 测试函数 —— 每个函数独立验证一个第三方库或构建产物。
+// 采用"声明即实现"的风格（类似 Java），放在 main() 前面。
+// 返回值：true = 该测试通过，false = 该测试失败。
+// 用法：在 main() 中注释掉不需要的调用即可跳过对应测试。
+// ============================================================
+
 /**
- * 主函数 —— 程序入口点
+ * 验证 1：version.h（CMake configure_file 生成的版本号模板）
  *
- * 按照 C++ 标准，main 函数不需要显式写 return 语句，
- * 编译器会在 main 末尾自动插入 return 0。
- * 但为了明确表达意图，我们显式返回 EXIT_SUCCESS 或 EXIT_FAILURE。
+ * 验证点：
+ *   - spdlog 日志库可以正常输出
+ *   - version.h 中的版本号宏被 CMake 正确替换
  *
- * @return EXIT_SUCCESS（0）：全部验证通过
- * @return EXIT_FAILURE（1）：至少一项验证失败
+ * @return true  始终返回 true（版本号输出不可能失败）
  */
-int main() {
-    // ============================================================
-    // 1. 验证 version.h（CMake configure_file 生成的版本号模板）
-    // ============================================================
-    // 这行日志同时验证了两件事：
-    //   a) spdlog 日志库可以正常输出
-    //   b) version.h 中的版本号宏被 CMake 正确替换
+bool verify_version_header() {
     // spdlog::info() 类似 printf，但使用 {} 作为占位符（fmt 风格）
     spdlog::info("=== {} v{}.{}.{} 构建系统验证 ===",
                  "BitPerfect CLI",                   // {} 第 1 个占位符
                  BITPERFECT_VERSION_MAJOR,            // {} 第 2 个占位符（主版本号）
                  BITPERFECT_VERSION_MINOR,            // {} 第 3 个占位符（次版本号）
                  BITPERFECT_VERSION_PATCH);           // {} 第 4 个占位符（修订版本号）
+    return true;
+}
 
-    // ============================================================
-    // 2. 验证 JUCE（juce_core 核心模块）
-    // ============================================================
+/**
+ * 验证 2：JUCE（juce_core 核心模块）
+ *
+ * 验证点：
+ *   - juce_core 模块可以正常链接
+ *   - juce::String 可以正常创建和使用
+ *   - juce::File 可以获取当前工作目录
+ *
+ * @return true  始终返回 true（字符串操作不可能失败）
+ */
+bool verify_juce_core() {
     // 创建一个 juce::String 对象并获取当前工作目录。
     // juce::String 是 JUCE 封装的 Unicode 字符串类，内部使用引用计数
     // 的写时复制（Copy-on-Write）策略来减少内存复制。
@@ -103,15 +115,20 @@ int main() {
     spdlog::info("[JUCE] {}，当前工作目录：{}",
                  juce_message.toStdString(),          // juce::String → std::string
                  current_dir.getFullPathName().toStdString());
+    return true;
+}
 
-    // ============================================================
-    // 3. 验证 nlohmann/json（JSON 解析库）
-    // ============================================================
-    // 验证点：
-    //   a) nlohmann/json 头文件可以正常 include
-    //   b) JSON 字符串可以正常解析
-    //   c) 字段值可以正确读取和类型转换
-    //
+/**
+ * 验证 3：nlohmann/json（JSON 解析库）
+ *
+ * 验证点：
+ *   - nlohmann/json 头文件可以正常 include
+ *   - JSON 字符串可以正常解析
+ *   - 字段值可以正确读取和类型转换
+ *
+ * @return true  始终返回 true（已知合法 JSON 字符串解析不可能失败）
+ */
+bool verify_nlohmann_json() {
     // R"(...)" 是 C++11 的原始字符串字面量（Raw String Literal），
     // 括号中的所有字符都是字面量（包括换行和引号），不需要转义。
     // 这对写 JSON 字符串非常方便 —— 不需要用 \" 转义双引号。
@@ -132,23 +149,29 @@ int main() {
     spdlog::info("[nlohmann/json] 项目名：{}，状态：{}",
                  config["project"].get<std::string>(),   // "BitPerfect"
                  config["status"].get<std::string>());   // "build_system_verified"
+    return true;
+}
 
-    // ============================================================
-    // 4. 验证 sqlite3（SQLite 嵌入式数据库）
-    // ============================================================
-    // 验证点：
-    //   a) sqlite3.c 可以被 C 编译器正确编译
-    //   b) C 编译产物可以被 C++ 链接器正确链接（extern "C" 机制）
-    //   c) 数据库的基本 CRUD（建表 → 插入 → 查询）操作正常
-    //
-    // SQLite 变量命名说明：
-    //   - rc (return code)：SQLite C API 的函数返回值，0 = SQLITE_OK
-    //   - db (database)：数据库连接句柄，类似文件描述符
-    //   - stmt (statement)：预编译 SQL 语句对象
-    //
-    // sqlite3* 是一个指针，指向 SQLite 内部维护的数据库连接结构体。
-    // 用户不需要关心结构体内部细节，只需通过 sqlite3_* 函数操作。
-
+/**
+ * 验证 4：sqlite3（SQLite 嵌入式数据库）
+ *
+ * 验证点：
+ *   - sqlite3.c 可以被 C 编译器正确编译
+ *   - C 编译产物可以被 C++ 链接器正确链接（extern "C" 机制）
+ *   - 数据库的基本 CRUD（建表 → 插入 → 查询）操作正常
+ *
+ * SQLite 变量命名说明：
+ *   - rc (return code)：SQLite C API 的函数返回值，0 = SQLITE_OK
+ *   - db (database)：数据库连接句柄，类似文件描述符
+ *   - stmt (statement)：预编译 SQL 语句对象
+ *
+ * sqlite3* 是一个指针，指向 SQLite 内部维护的数据库连接结构体。
+ * 用户不需要关心结构体内部细节，只需通过 sqlite3_* 函数操作。
+ *
+ * @return true  SQLite CRUD 全部成功
+ * @return false 建表、插入或查询任一环节失败
+ */
+bool verify_sqlite3() {
     sqlite3* db = nullptr;                           // 数据库连接句柄，初始化为空指针
 
     // sqlite3_open() 打开（或创建）一个数据库文件
@@ -160,7 +183,7 @@ int main() {
     if (rc != SQLITE_OK) {
         // sqlite3_errmsg(db) 返回人类可读的英文错误描述
         spdlog::error("[sqlite3] 无法打开内存数据库：{}", sqlite3_errmsg(db));
-        return EXIT_FAILURE;                         // 非零返回值表示程序异常退出
+        return false;                                // 测试失败，返回 false
     }
 
     // --- 创建测试表 ---
@@ -174,8 +197,8 @@ int main() {
     rc = sqlite3_exec(db, create_sql, nullptr, nullptr, nullptr);
     if (rc != SQLITE_OK) {
         spdlog::error("[sqlite3] 建表失败：{}", sqlite3_errmsg(db));
-        sqlite3_close(db);                           // 关闭数据库连接，释放资源
-        return EXIT_FAILURE;
+        sqlite3_close(db);                           // 失败前关闭数据库连接，释放资源
+        return false;
     }
 
     // --- 插入测试数据 ---
@@ -186,7 +209,7 @@ int main() {
     if (rc != SQLITE_OK) {
         spdlog::error("[sqlite3] 插入数据失败：{}", sqlite3_errmsg(db));
         sqlite3_close(db);
-        return EXIT_FAILURE;
+        return false;
     }
 
     // --- 查询验证 ---
@@ -222,11 +245,18 @@ int main() {
     // sqlite3_close() 关闭数据库连接，将内存数据写回磁盘（对于 :memory: 数据库则直接丢弃）
     sqlite3_close(db);
 
-    // ============================================================
-    // 5. 总结输出
-    // ============================================================
-    // 如果程序运行到这里没有中途退出，说明前面所有验证步骤都通过了。
-    // 用醒目的分隔线输出总结信息，方便人工快速判断构建系统是否就绪。
+    return true;                                     // 所有 SQLite 操作成功
+}
+
+/**
+ * 验证 5：输出验证总结
+ *
+ * 如果程序运行到这里，说明前面所有被启用的测试都通过了。
+ * 用醒目的分隔线输出总结信息，方便人工快速判断构建系统是否就绪。
+ *
+ * @return true  始终返回 true
+ */
+bool print_verify_summary() {
     spdlog::info("============================================");
     spdlog::info("全部第三方库验证通过！");
     spdlog::info("  ✅ JUCE (juce_core)   — 字符串、文件路径");
@@ -235,8 +265,39 @@ int main() {
     spdlog::info("  ✅ sqlite3             — 内存数据库建表+查询");
     spdlog::info("  ✅ version.h           — CMake configure_file");
     spdlog::info("============================================");
+    return true;
+}
 
-    // EXIT_SUCCESS 是标准库宏（值为 0），表示程序正常结束
-    // 操作系统和 CI 环境通过检查进程退出码来判断程序是否成功
+
+/**
+ * 主函数 —— 程序入口点
+ *
+ * 依次调用各个测试函数，任意一个返回 false 则整体退出码为 EXIT_FAILURE。
+ * 如需跳过某个测试，直接注释掉对应的调用行即可。
+ *
+ * 按照 C++ 标准，main 函数不需要显式写 return 语句，
+ * 编译器会在 main 末尾自动插入 return 0。
+ * 但为了明确表达意图，我们显式返回 EXIT_SUCCESS 或 EXIT_FAILURE。
+ *
+ * @return EXIT_SUCCESS（0）：全部被启用的测试通过
+ * @return EXIT_FAILURE（1）：至少一项测试失败
+ */
+int main() {
+    // 以下每个函数调用对应一个独立的验证测试。
+    // 注释掉某一行即可跳过对应测试，不影响其他测试的执行。
+    // 测试执行顺序即为调用顺序。
+
+    bool all_passed = true;                          // 跟踪所有测试是否通过
+
+    all_passed = verify_version_header() && all_passed;  // 测试 1：version.h + spdlog
+    all_passed = verify_juce_core() && all_passed;       // 测试 2：JUCE core 模块
+    all_passed = verify_nlohmann_json() && all_passed;   // 测试 3：nlohmann/json 解析
+    all_passed = verify_sqlite3() && all_passed;         // 测试 4：SQLite 内存数据库 CRUD
+    all_passed = print_verify_summary() && all_passed;   // 测试 5：输出验证总结
+
+    // 任一失败则返回 EXIT_FAILURE，操作系统和 CI 可据此判断构建是否就绪
+    if (!all_passed) {
+        return EXIT_FAILURE;
+    }
     return EXIT_SUCCESS;
 }
