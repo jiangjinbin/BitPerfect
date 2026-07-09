@@ -104,9 +104,10 @@ AudioDecoder::~AudioDecoder() {
 /**
  * 打开音频文件并提取元数据
  *
- * 当前状态（2.2.4）：✅ 完整实现
+ * 当前状态（2.2.4）：✅ 完整实现（2026-07-09 修复 repeat-open 悬垂指针 bug）
  *
  * 执行流程：
+ *   0. 释放旧 reader_（防止 repeat-open 时旧 reader_ 持有已销毁 AudioFormat 的悬垂指针）
  *   1. 创建 AudioFormatManager 并注册基本格式（WAV、FLAC、AIFF 等）
  *   2. 通过 format_manager_ 创建 AudioFormatReader
  *   3. 提取元数据（采样率、声道数、位深、总采样数、时长）
@@ -119,10 +120,29 @@ AudioDecoder::~AudioDecoder() {
  */
 bool AudioDecoder::open(const juce::File& file) {
     // ============================================================
+    // 步骤 0：释放旧 reader_（防止 repeat-open 悬垂指针 bug）
+    // ============================================================
+    // 背景：reader_ 内部持有指向 AudioFormat 对象的裸指针（JUCE 设计），
+    //       这些 AudioFormat 对象由 format_manager_ 统一管理生命周期。
+    //
+    // 问题：如果先销毁 format_manager_（步骤 1 的赋值操作会触发），
+    //       AudioFormat 对象也随之销毁，但 reader_ 此时还活着，
+    //       其内部的 AudioFormat 裸指针变成悬垂指针。
+    //
+    // 解决：在创建新 format_manager_ 之前先释放旧 reader_。
+    //       此时旧 format_manager_ 仍然存活，旧 reader_ 析构时
+    //       访问的 AudioFormat 指针仍然有效，不会触发 use-after-free。
+    //
+    // 首次调用时 reader_ 为 nullptr，reset(nullptr) 是安全的空操作。
+    reader_.reset();
+
+    // ============================================================
     // 步骤 1：创建 AudioFormatManager 并注册基本音频格式
     // ============================================================
     // std::make_unique 遵循编码规范（禁止裸 new）
     // registerBasicFormats() 会注册 WAV、FLAC、AIFF、OGG、MP3 等 JUCE 内置支持的格式
+    // 注意：此赋值会先销毁旧的 format_manager_（以及其中注册的 AudioFormat 对象），
+    //       但步骤 0 已确保旧 reader_ 在此之前被释放，因此不会有悬垂指针问题
     format_manager_ = std::make_unique<juce::AudioFormatManager>();
     format_manager_->registerBasicFormats();
 
@@ -223,19 +243,124 @@ bool AudioDecoder::open(const juce::File& file) {
 /**
  * 启动后台解码线程
  *
- * 当前状态（2.2.3）：空桩实现，不执行任何操作
- * 目标步骤：2.2.5 实现线程启动逻辑
+ * 当前状态（2.2.5）：✅ 完整实现
  *
- * 线程约束：必须在 open() 成功后调用（当前空桩无前置条件检查）
+ * 执行流程（6 个步骤）：
+ *   1. 前置检查：reader_ 是否已创建（open() 是否调用成功），未就绪则打印错误并返回
+ *   2. 重复调用检查：running_ 是否已为 true，若已在运行则幂等忽略（防止创建多个线程竞争）
+ *   3. 旧线程回收：decoding_thread_ 是否 joinable，若是则先 join（防止移动赋值触发 std::terminate）
+ *   4. 状态初始化：running_ = true、decoding_complete_ = false、current_position_ = 0
+ *   5. 创建线程：std::thread 执行 decodingLoop()，保存到 decoding_thread_
+ *   6. 成功日志：输出采样率、声道数、位深等信息
+ *
+ * 线程约束：必须在 open() 成功后由 CLI/UI 线程调用。
+ *         重复调用安全（幂等操作，已运行时忽略）。
+ *
+ * ⚠️ 安全警告（临时）：
+ *   stopDecoding() 当前仍是空桩（2.2.6 待实现）。
+ *   本方法创建的线程在析构前必须通过 stopDecoding() join，否则 std::thread 析构触发 std::terminate()。
+ *   当前阶段（2.2.5）不会运行测试，无实际崩溃风险。2.2.6 实现后此警告自动解除。
  */
 void AudioDecoder::startDecoding() {
-    // TODO: 2.2.5 实现以下逻辑：
-    //   1. 检查 reader_ 是否已创建（open() 是否调用成功），若未就绪则直接返回
-    //   2. 设置 running_ = true、decoding_complete_ = false、current_position_ = 0
-    //   3. 创建 std::thread，执行 decodingLoop()，保存到 decoding_thread_
-    //   4. 若解码线程已在运行（running_ 已为 true），忽略本次调用（防止多线程竞争）
+    // ============================================================
+    // 步骤 1：前置条件检查 —— reader_ 是否已创建（open() 是否调用成功）
+    // ============================================================
+    // reader_ 在 open() 中通过 format_manager_->createReaderFor() 创建
+    // 若 open() 尚未调用或调用失败，reader_ 保持 nullptr（头文件类内初始化的默认值）
+    // 此时没有文件可以解码，必须拒绝调用
+    if (reader_ == nullptr) {
+        // spdlog::error 输出错误日志到控制台
+        // 提示调用者：必须先成功调用 open() 才能启动解码线程
+        spdlog::error("startDecoding() 调用失败：reader_ 未创建，请先调用 open() 打开音频文件");
+        return;
+    }
 
-    // 当前空桩：无操作
+    // ============================================================
+    // 步骤 2：重复调用检查 —— 解码线程是否已在运行
+    // ============================================================
+    // running_ 是原子变量（std::atomic<bool>），由解码线程在 while(running_) 中读取
+    // 若已为 true，说明解码循环正在另一个线程中执行
+    // 此时如果创建第二个线程，会导致三个严重问题：
+    //   1. 两个线程同时调用 reader_->read()，reader_ 不是线程安全的 → 数据错乱
+    //   2. 两个线程同时写入 AbstractFifo → 数据相互覆盖
+    //   3. decoding_thread_ = std::thread(...) 移动赋值会先析构旧线程 → std::terminate() 崩溃
+    //
+    // 因此必须幂等返回，静默忽略本次重复调用
+    // load() 使用默认 memory_order_seq_cst，与头文件文档中的"任意线程安全"语义一致
+    if (running_.load()) {
+        // spdlog::warn 输出警告日志（非 error，因为系统仍正常运行，只是调用方做了多余调用）
+        spdlog::warn("startDecoding() 被重复调用，解码线程已在运行中，忽略本次调用");
+        return;
+    }
+
+    // ============================================================
+    // 步骤 3：旧线程回收 —— 检测并 join 上一个已结束但未回收的线程
+    // ============================================================
+    // 虽然当前 stopDecoding() 是空桩，但在以下场景中仍可能出现 joinable 但 running_ 为 false 的线程：
+    //   - decodingLoop() 内 while(running_) 循环退出，线程函数返回（线程结束）
+    //   - 但 decoding_thread_ 对象尚未被 join，处于 joinable 状态
+    //   - 此时 running_ 为 false（通过了步骤 2 的检查），但线程尚未回收
+    //
+    // 如果不先 join 就直接执行 decoding_thread_ = std::thread(...)：
+    //   - std::thread 的移动赋值运算符会先析构左侧的旧线程对象
+    //   - 若旧线程处于 joinable 状态，std::thread 析构函数调用 std::terminate()
+    //   - 导致整个进程崩溃（C++ 标准规定，joinable 的 std::thread 析构时调用 std::terminate）
+    //
+    // 因此必须在此处检测并安全回收旧线程资源
+    if (decoding_thread_.joinable()) {
+        // spdlog::info 输出信息日志，记录这个正常的资源回收操作
+        spdlog::info("startDecoding()：检测到上一个解码线程未 join，先 join 再创建新线程");
+        // join() 会阻塞当前线程（CLI/UI 线程）直到旧解码线程完全结束
+        // 由于旧线程函数已经返回（joinable 意味着线程已结束），此处的 join() 会立即返回
+        // join() 之后，decoding_thread_ 变为不可 joinable 状态，安全
+        decoding_thread_.join();
+    }
+
+    // ============================================================
+    // 步骤 4：初始化运行状态
+    // ============================================================
+    // ⚠️ 顺序至关重要：running_ 必须在创建线程之前设为 true
+    // 如果先创建线程再设 running_ = true，可能出现竞态：
+    //   新线程启动 → 读取 running_（此时还是 false）→ while(running_) 循环立即退出 → 线程结束
+    //   结果：解码线程"一闪而过"，什么都没做就退出了
+    //
+    // store() 使用默认 memory_order_seq_cst（顺序一致性），
+    // 与 std::thread 创建的 happens-before 关系共同保证新线程能看到这个值
+    running_.store(true);
+
+    // decoding_complete_ 重置为 false，表示解码尚未完成
+    // 上一轮解码可能已到达文件末尾（decoding_complete_ == true），必须重置
+    decoding_complete_.store(false);
+
+    // current_position_ 重置为 0（文件起始位置）
+    // 注意：如果是在 seekTo() 中调用的 startDecoding()，
+    // seekTo() 会在调用本方法前通过 reader_->setReadPosition() 设置文件读取位置，
+    // decodingLoop() 从该位置开始读取，并通过 reader_->getReadPosition() 更新此值
+    current_position_.store(0);
+
+    // ============================================================
+    // 步骤 5：创建解码线程
+    // ============================================================
+    // std::thread 构造参数说明：
+    //   第一个参数 &AudioDecoder::decodingLoop —— 成员函数指针（C++ 标准语法）
+    //   第二个参数 this                        —— 传给成员函数的隐式 this 指针
+    //
+    // 线程创建后立即开始执行 decodingLoop()，与当前线程（CLI/UI 线程）并发运行
+    // 线程对象通过移动赋值（=）保存到 decoding_thread_ 成员变量中
+    // 移动赋值后，右侧的临时 std::thread 对象变为"空"状态（不可 joinable），析构安全
+    //
+    // 注意：当前 decodingLoop() 是空桩（2.2.7 待实现），线程创建后会立即返回
+    decoding_thread_ = std::thread(&AudioDecoder::decodingLoop, this);
+
+    // ============================================================
+    // 步骤 6：输出启动成功日志
+    // ============================================================
+    // spdlog::info 输出信息日志，包含当前文件的音频参数
+    // 这些参数来自 file_info_（open() 中填充），在此处为只读访问（无竞态问题）
+    // 日志格式与 open() 中的成功日志保持一致（见本文件第 214-218 行）
+    // {} 格式符用于 sample_rate（double 类型，spdlog 会格式化为 44100 而非 44100.0）
+    spdlog::info("startDecoding()：解码线程已启动（{} Hz / {} 声道 / {} bit）",
+                 file_info_.sample_rate, file_info_.num_channels, file_info_.bit_depth);
 }
 
 /**
