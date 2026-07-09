@@ -255,11 +255,6 @@ bool AudioDecoder::open(const juce::File& file) {
  *
  * 线程约束：必须在 open() 成功后由 CLI/UI 线程调用。
  *         重复调用安全（幂等操作，已运行时忽略）。
- *
- * ⚠️ 安全警告（临时）：
- *   stopDecoding() 当前仍是空桩（2.2.6 待实现）。
- *   本方法创建的线程在析构前必须通过 stopDecoding() join，否则 std::thread 析构触发 std::terminate()。
- *   当前阶段（2.2.5）不会运行测试，无实际崩溃风险。2.2.6 实现后此警告自动解除。
  */
 void AudioDecoder::startDecoding() {
     // ============================================================
@@ -366,22 +361,75 @@ void AudioDecoder::startDecoding() {
 /**
  * 停止解码并等待线程退出
  *
- * 当前状态（2.2.3）：空桩实现，不执行任何操作
- * 目标步骤：2.2.6 实现线程停止和资源重置逻辑
+ * 当前状态（2.2.6）：✅ 完整实现
  *
- * 注意：析构函数会调用本方法。当前空桩期间：
- *   - 构造 → 析构 的完整生命周期中，decoding_thread_ 保持默认构造状态（不可 joinable）
- *   - std::thread 在不可 joinable 状态下析构是安全的（不会调用 std::terminate()）
- *   - 2.2.5 实现 startDecoding() 创建线程后，必须先通过 stopDecoding() join 才能安全析构
+ * 执行流程（3 个步骤）：
+ *   1. 设置 running_ = false，通知 decodingLoop() 退出 while 循环
+ *   2. 若 decoding_thread_ 可 joinable，调用 join() 阻塞等待线程完全退出
+ *   3. 若 fifo_ 已创建，调用 reset() 重置读写指针，清空缓冲区中未消费的数据
+ *
+ * 线程安全：
+ *   - 可在任意（非音频回调）线程调用
+ *   - 通过 std::atomic<bool> 与解码线程通信，无锁操作
+ *   - 幂等安全：多次调用安全无副作用（join 后的线程 joinable() 返回 false，自动跳过）
+ *
+ * 生命周期：
+ *   - 析构函数会调用本方法，确保 std::thread 在 joinable 状态下不会被析构（避免 std::terminate）
+ *   - 用户也可主动调用以提前停止解码
+ *
+ * ⚠️ 时序要求：join() 必须在 fifo_->reset() 之前执行，
+ *   防止解码线程还在写 fifo 时 reset 造成数据竞争。
  */
 void AudioDecoder::stopDecoding() {
-    // TODO: 2.2.6 实现以下逻辑：
-    //   1. 设置 running_ = false（通知 decodingLoop 退出 while 循环）
-    //   2. 若 decoding_thread_.joinable()，调用 join() 等待线程完全结束
-    //   3. 重置 AbstractFifo 读写指针（若 fifo_ 已创建）
-    //   4. 重复调用安全（幂等操作，join 后的线程 joinable() 返回 false）
+    // ============================================================
+    // 步骤 1：设置退出标志，通知解码线程停止
+    // ============================================================
+    // running_ 是 std::atomic<bool>，解码线程在 decodingLoop() 的 while(running_) 循环中读取
+    // 此处设为 false 后，解码线程会在下一次循环条件检查时退出
+    // store() 使用默认 memory_order_seq_cst（顺序一致性），确保解码线程能看到最新值
+    // 即使 running_ 已经是 false（startDecoding() 从未调用，或 stopDecoding() 被重复调用），
+    // 重复 store 也无副作用，保证了幂等安全性
+    running_.store(false);
 
-    // 当前空桩：无操作
+    // ============================================================
+    // 步骤 2：等待解码线程完全退出
+    // ============================================================
+    // joinable() 检查确保只在线程存在且尚未被 join 时才执行 join
+    // 以下场景会通过此检查：
+    //   a. startDecoding() 创建了线程，且线程尚未被 join → 执行 join 等待
+    //   b. startDecoding() 从未调用 → decoding_thread_ 保持默认构造状态，不可 joinable → 跳过
+    //   c. stopDecoding() 已被调用过一次 → 上次的 join 使线程变为不可 joinable → 跳过（幂等）
+    //
+    // join() 会阻塞当前线程（CLI/UI 线程）直到解码线程的 decodingLoop() 完全退出
+    // 如果解码线程正在 reader_->read() 中阻塞（等待磁盘 I/O），
+    // join() 会一直等待直到 read() 返回、while 循环退出、线程函数返回为止
+    //
+    // ⚠️ join() 必须在 fifo_->reset() 之前执行：
+    //   join 前解码线程可能还在向 fifo 写入数据，此时 reset 会产生数据竞争
+    //   join 后解码线程已完全停止，reset 是安全的
+    if (decoding_thread_.joinable()) {
+        // 阻塞等待解码线程完全退出
+        decoding_thread_.join();
+
+        // 输出停止成功日志（与 startDecoding() 的启动日志对称）
+        spdlog::info("stopDecoding()：解码线程已停止");
+    }
+
+    // ============================================================
+    // 步骤 3：重置无锁环形缓冲区读写指针
+    // ============================================================
+    // AbstractFifo 只管理读写指针，不管理底层数据缓冲区
+    // reset() 将读写指针归零，清空缓冲区中所有未消费的解码数据
+    //
+    // 判空检查：
+    //   - 如果 open() 从未调用，fifo_ 为 nullptr（头文件类内初始化的默认值）
+    //   - 此时跳过 reset，避免空指针解引用
+    //
+    // 注意：此处不释放 fifo_buffer_（底层内存）和 decode_buffer_（解码临时缓冲），
+    // 它们由 open() 在下一次调用时重新分配，或由析构函数自动回收（RAII）
+    if (fifo_ != nullptr) {
+        fifo_->reset();
+    }
 }
 
 /**
