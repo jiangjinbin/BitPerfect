@@ -6,18 +6,20 @@
  *          decodingLoop() 运行在独立后台线程，
  *          getFifo()/isDecodingComplete()/getDecodedPosition() 可被任意线程安全调用
  *
- * 当前状态（2.2.4）：
+ * 当前状态（2.2.7）：
  *   - ✅ 构造函数：空体，所有成员已在 AudioDecoder.h 中通过类内初始化赋予安全默认值
  *   - ✅ 析构函数：调用 stopDecoding() 确保线程已终止
  *   - ✅ open()：完整实现（AudioFormatManager 创建 → AudioFormatReader 创建 → 元数据提取 → Fifo 分配）
- *   - ⬜ 其余 9 个方法：空桩实现，等待后续步骤逐步替换
+ *   - ✅ startDecoding()：完整实现（前置检查 + 线程创建 + 原子状态初始化）
+ *   - ✅ stopDecoding()：完整实现（原子退出标志 + join 等待 + Fifo 重置）
+ *   - ✅ decodingLoop()：完整实现（while 循环读取 → Fifo 阻塞写入 → EOF 检测 → 异常安全）
+ *   - ✅ getFifo()：已提前实现（返回 *fifo_ 引用，原属 2.2.9，为端到端测试所需）
+ *   - ✅ isDecodingComplete()：已提前实现（返回 decoding_complete_.load()，原属 2.2.9）
+ *   - ✅ getDecodedPosition()：已提前实现（返回 current_position_.load()，原属 2.2.9）
+ *   - ⬜ 其余 2 个方法：空桩实现，等待后续步骤逐步替换
  *
  * 后续步骤映射：
- *   2.2.5  → startDecoding()
- *   2.2.6  → stopDecoding()
- *   2.2.7  → decodingLoop()
  *   2.2.8  → seekTo()
- *   2.2.9  → getFifo()、isDecodingComplete()、getDecodedPosition()
  *   2.2.10 → addListener()、removeListener()
  */
 
@@ -30,6 +32,12 @@
 // 第三方库
 // ============================================================
 #include <spdlog/spdlog.h>  // 日志输出：spdlog::info()、spdlog::error()
+
+// ============================================================
+// C++ 标准库
+// ============================================================
+#include <chrono>   // std::chrono::milliseconds —— 解码线程等待 fifo 空间时的休眠时长
+#include <cstring>  // std::memcpy —— 逐声道拷贝 PCM 数据
 
 
 // ============================================================
@@ -184,7 +192,7 @@ bool AudioDecoder::open(const juce::File& file) {
     file_info_.sample_rate = reader_->sampleRate;                              // 采样率（Hz）
     file_info_.num_channels = static_cast<int>(reader_->numChannels);          // 声道数
     file_info_.bit_depth = static_cast<int>(reader_->bitsPerSample);           // 位深（bit）
-    file_info_.total_samples = reader_->lengthInSamples;                       // 总采样帧数
+    file_info_.total_frames = reader_->lengthInSamples;                       // 总采样帧数
     file_info_.format_name = reader_->getFormatName().toStdString();           // 格式名（"FLAC"/"WAV"等）
 
     // ============================================================
@@ -192,7 +200,7 @@ bool AudioDecoder::open(const juce::File& file) {
     // ============================================================
     // duration_seconds = 总采样帧数 / 采样率
     // 使用 static_cast<double> 确保浮点除法（避免整数截断）
-    file_info_.duration_seconds = static_cast<double>(file_info_.total_samples) / file_info_.sample_rate;
+    file_info_.duration_seconds = static_cast<double>(file_info_.total_frames) / file_info_.sample_rate;
 
     // ============================================================
     // 步骤 7：动态计算 AbstractFifo 容量
@@ -243,7 +251,7 @@ bool AudioDecoder::open(const juce::File& file) {
     spdlog::info("  采样率：{:.0f} Hz，声道：{}，位深：{} bit",
                  file_info_.sample_rate, file_info_.num_channels, file_info_.bit_depth);
     spdlog::info("  总采样数：{}，时长：{:.2f} 秒",
-                 file_info_.total_samples, file_info_.duration_seconds);
+                 file_info_.total_frames, file_info_.duration_seconds);
 
     return true;
 }
@@ -450,7 +458,7 @@ void AudioDecoder::stopDecoding() {
  */
 void AudioDecoder::seekTo(juce::int64 sample_position) {
     // TODO: 2.2.8 实现以下逻辑：
-    //   1. 验证 sample_position 在 [0, total_samples] 范围内，越界则静默忽略
+    //   1. 验证 sample_position 在 [0, total_frames] 范围内，越界则静默忽略
     //   2. 调用 stopDecoding() 暂停当前解码
     //   3. 重置 AbstractFifo 读写指针
     //   4. 调用 reader_->setPosition(sample_position) 更新文件读取位置
@@ -479,16 +487,10 @@ void AudioDecoder::seekTo(juce::int64 sample_position) {
  *          当前空桩期间无此约束（占位对象始终存在）。
  */
 juce::AbstractFifo& AudioDecoder::getFifo() {
-    // TODO: 2.2.9 替换为以下实现：
-    //   return *fifo_;
-    //   直接返回 fifo_ 指向的 AbstractFifo 对象的引用，供音频线程调用 read() 方法
-    //   无锁读取 PCM 数据，不违反实时线程"禁止加锁"的硬实时约束
-
-    // ⚠️ 空桩专用：函数局部静态变量，生命周期 = 程序运行期
-    //   容量参数 1 是占位值，无实际意义
-    //   2.2.9 替换为真实实现后，删除本行
-    static juce::AbstractFifo placeholder(1);
-    return placeholder;
+    // 直接返回 fifo_ 指向的 AbstractFifo 对象的引用
+    // AbstractFifo 使用原子变量管理读写指针，任意线程安全访问
+    // 音频实时线程可以安全调用 prepareToRead() / finishedRead() 无锁读取 PCM 数据
+    return *fifo_;
 }
 
 /**
@@ -500,12 +502,8 @@ juce::AbstractFifo& AudioDecoder::getFifo() {
  * @return 当前始终返回 false（空桩）
  */
 bool AudioDecoder::isDecodingComplete() const {
-    // TODO: 2.2.9 替换为以下实现：
-    //   return decoding_complete_.load();
-    //   原子变量 load 操作，任意线程安全
-
-    // 空桩返回值：始终返回 false，表示解码未完成
-    return false;
+    // 原子变量 load 操作，任意线程安全读取解码完成状态
+    return decoding_complete_.load();
 }
 
 /**
@@ -517,12 +515,8 @@ bool AudioDecoder::isDecodingComplete() const {
  * @return 当前始终返回 0（空桩），表示尚未开始解码
  */
 juce::int64 AudioDecoder::getDecodedPosition() const {
-    // TODO: 2.2.9 替换为以下实现：
-    //   return current_position_.load();
-    //   原子变量 load 操作，任意线程安全
-
-    // 空桩返回值：始终返回 0，表示解码位置为起始位置
-    return 0;
+    // 原子变量 load 操作，任意线程安全读取当前解码位置
+    return current_position_.load();
 }
 
 /**
@@ -574,31 +568,179 @@ void AudioDecoder::removeListener(Listener* listener) {
 /**
  * 解码线程主循环
  *
- * 当前状态（2.2.3）：空桩实现，不执行任何操作
+ * 当前状态（2.2.7）
  * 目标步骤：2.2.7 实现完整的解码循环逻辑
  *
  * 线程约束：仅由 decoding_thread_ 执行（2.2.5 创建线程后），不直接在其他线程调用
  */
 void AudioDecoder::decodingLoop() {
-    // TODO: 2.2.7 实现以下逻辑：
-    //   while (running_) {
-    //       1. reader_->read(&decode_buffer_, 0, frames_per_chunk, start_sample, true)
-    //          从当前文件位置读取一帧（4096 frames），解码到 decode_buffer_ 中
-    //       2. 若返回值 <= 0（文件末尾或错误）：设置 decoding_complete_ = true，退出循环
-    //       3. 将 decode_buffer_ 中的数据写入 fifo_buffer_（均为 AudioBuffer<float>）：
-    //          a. 实际读取的采样帧数 = reader_->read() 的返回值
-    //          b. fifo_->prepareToWrite(num_frames, start1, size1, start2, size2)
-    //             获取 fifo_buffer_ 中可写入的声道内位置
-    //          c. 逐声道 memcpy：
-    //             for (ch = 0; ch < num_channels; ++ch) {
-    //                 从 decode_buffer_.getReadPointer(ch)
-    //                 拷入 fifo_buffer_.getWritePointer(ch) + start1
-    //             }
-    //             （AudioBuffer 内部是平面存储，每声道独立数组，直接 memcpy 即可）
-    //          d. fifo_->finishedWrite(size1 + size2)
-    //       4. 更新 current_position_ = reader_->getPosition()
-    //   }
-    //   异常捕获：read() 或 write() 抛出异常时设置 running_ = false，避免崩溃
+    // ============================================================
+    // 步骤 1：获取音频文件参数（只读常量，线程安全）
+    // ============================================================
+    // 将成员变量缓存为局部常量，避免每次循环都通过 this 指针间接访问
+    //（编译器的优化器通常会自动做这件事，但显式写出更清晰）
+    int num_channels = file_info_.num_channels;               // 声道数（1 = 单声道，2 = 立体声）
+    juce::int64 total_frames = file_info_.total_frames;     // 文件总采样帧数
 
-    // 当前空桩：无操作
+    // 每次解码的最大采样帧数（与 open() 中 decode_buffer_ 分配大小一致，见第 235 行）
+    const int kFramesPerChunk = 4096;
+
+    // 当前读取位置（从文件开头算起，0-based）
+    // ⚠️ 使用局部变量手动追踪位置，而非 reader_->getPosition()
+    //    原因：AudioFormatReader 基类没有 getPosition() 方法（JUCE 8.0.14 确认）
+    //    每次成功读取 frames_to_read 帧后递增，精确追踪已读取的采样帧数
+    juce::int64 read_position = 0;
+
+    // ============================================================
+    // 步骤 2：解码主循环（受 running_ 原子变量控制）
+    // ============================================================
+    // running_ 由 startDecoding() 设为 true，stopDecoding() 设为 false
+    // 解码线程在每次循环迭代开始时检查，确保能及时响应停止请求
+    try {
+        while (running_.load()) {
+            // ----------------------------------------------------
+            // 2a. 检查是否已到达文件末尾（EOF 检测）
+            // ----------------------------------------------------
+            // ⚠️ 注意：reader_->read() 的返回值是 bool，读到文件尾时只是补零并返回 true，
+            //    无法通过返回值判断是否到达 EOF。因此使用手动位置追踪替代原方案中的
+            //    "若返回值 <= 0 则退出" 逻辑。
+            if (read_position >= total_frames) {
+                // 设置解码完成标志（原子写入，任意线程通过 isDecodingComplete() 可见）
+                decoding_complete_.store(true);
+                spdlog::info("解码完成：已到达文件末尾（共 {} 采样帧）", total_frames);
+                break;
+            }
+
+            // ----------------------------------------------------
+            // 2b. 计算本次要读取的采样帧数
+            // ----------------------------------------------------
+            // 文件最后一帧可能不足 4096 帧，需要动态调整读取数量
+            // 使用 juce::int64 做减法避免整数溢出（total_frames 可达 2^63）
+            juce::int64 remaining = total_frames - read_position;
+            int frames_to_read = static_cast<int>(
+                (remaining < kFramesPerChunk) ? remaining : kFramesPerChunk);
+
+            // ----------------------------------------------------
+            // 2c. 从文件解码一段音频数据到 decode_buffer_
+            // ----------------------------------------------------
+            // read() 参数说明（JUCE AudioFormatReader，6 个参数）：
+            //   &decode_buffer_  —— 目标 AudioBuffer<float>，在 open() 中已分配 4096 帧
+            //   0                —— 目标 buffer 中的起始写入偏移（从头开始写）
+            //   frames_to_read   —— 本次要读取的采样帧数
+            //   read_position    —— 文件中起始读取位置（0-based 绝对位置）
+            //   true             —— useReaderLeftChan（使用文件的左声道）
+            //   true             —— useReaderRightChan（使用文件的右声道）
+            // ⚠️ 注意：原 TODO 注释中只有 5 个参数，缺少第六个参数 useReaderRightChan，
+            //    JUCE 8.0.14 实际 API 需要 6 个参数，此处已修正。
+            bool read_success = reader_->read(
+                &decode_buffer_,          // 目标 AudioBuffer
+                0,                         // 目标起始偏移
+                frames_to_read,            // 读取帧数
+                read_position,             // 文件中起始位置
+                true,                      // 使用左声道
+                true                       // 使用右声道
+            );
+
+            // 读取失败处理（磁盘错误、文件损坏等，非 EOF 情况）
+            if (!read_success) {
+                spdlog::error("解码错误：reader_->read() 在位置 {} 处返回 false", read_position);
+                running_.store(false);
+                break;
+            }
+
+            // ----------------------------------------------------
+            // 2d. 将 decode_buffer_ 中的数据写入 fifo_buffer_
+            // ----------------------------------------------------
+            // 数据流：decode_buffer_（临时缓冲）→ fifo_buffer_（环形缓冲区）
+            // 两个缓冲区都是 juce::AudioBuffer<float>，内部均为平面存储（planar），
+            // 因此可以直接逐声道 memcpy，无需做平面 ↔ 交错格式转换
+            {
+                // --- 2d-i. 获取环形缓冲区中的可写入位置 ---
+                // prepareToWrite 返回最多两个连续段（因为环形缓冲区可能回绕到开头）
+                // start1/size1：第一段连续区域的起始位置和大小
+                // start2/size2：第二段连续区域的起始位置和大小（回绕部分，可能为 0）
+                int start1 = 0, size1 = 0, start2 = 0, size2 = 0;
+                fifo_->prepareToWrite(frames_to_read, start1, size1, start2, size2);
+                int total_writable = size1 + size2;
+
+                // --- 2d-ii. 若 fifo 已满，等待消费者（音频引擎）读取释放空间 ---
+                // 解码线程不是实时线程，可以阻塞等待（使用 sleep 而非忙等，避免 CPU 空转）
+                // 等待期间持续检查 running_，确保 stopDecoding() 可以及时中断等待
+                while (running_.load() && total_writable < frames_to_read) {
+                    // 休眠 5 毫秒，让出 CPU 给消费者线程
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    // 重新尝试获取写入位置
+                    fifo_->prepareToWrite(frames_to_read, start1, size1, start2, size2);
+                    total_writable = size1 + size2;
+                }
+
+                // 如果在等待期间 stopDecoding() 被调用（running_ 变为 false），退出循环
+                if (!running_.load()) {
+                    break;
+                }
+
+                // --- 2d-iii. 逐声道拷贝第一段数据（start1 开始，size1 帧）---
+                // 两个 AudioBuffer 均为平面存储（planar），每个声道是独立的 float 数组
+                // getReadPointer(ch) 返回解码数据的声道 ch 起始地址（只读）
+                // getWritePointer(ch) 返回 fifo 缓冲区的声道 ch 起始地址（可写）
+                if (size1 > 0) {
+                    for (int ch = 0; ch < num_channels; ++ch) {
+                        const float* src = decode_buffer_.getReadPointer(ch);
+                        float* dst = fifo_buffer_.getWritePointer(ch);
+                        // memcpy 参数：目标地址、源地址、字节数
+                        // sizeof(float) * size1 = 拷贝的字节数
+                        std::memcpy(dst + start1, src,
+                                    static_cast<size_t>(size1) * sizeof(float));
+                    }
+                }
+
+                // --- 2d-iv. 逐声道拷贝第二段数据（start2 开始，size2 帧，回绕部分）---
+                // 当 size2 > 0 时，说明环形缓冲区写入位置回绕到了缓冲区开头
+                // 源数据从 decode_buffer_ 的第 size1 帧开始（前 size1 帧已在第一段拷贝）
+                if (size2 > 0) {
+                    for (int ch = 0; ch < num_channels; ++ch) {
+                        const float* src = decode_buffer_.getReadPointer(ch) + size1;
+                        float* dst = fifo_buffer_.getWritePointer(ch);
+                        std::memcpy(dst + start2, src,
+                                    static_cast<size_t>(size2) * sizeof(float));
+                    }
+                }
+
+                // --- 2d-v. 通知 AbstractFifo 写入完成 ---
+                // finishedWrite 原子性地推进写指针，使新数据对消费者（prepareToRead）立即可见
+                fifo_->finishedWrite(total_writable);
+            }
+
+            // ----------------------------------------------------
+            // 2e. 更新解码位置
+            // ----------------------------------------------------
+            // 读取成功，推进位置
+            read_position += frames_to_read;
+
+            // 将当前位置写入原子变量，供 getDecodedPosition() 在任意线程查询
+            // 使用默认 memory_order_seq_cst（顺序一致性），与头文件文档一致
+            current_position_.store(read_position);
+        }
+    } catch (const std::exception& e) {
+        // ============================================================
+        // 异常处理：捕获 std::exception 及其子类
+        // ============================================================
+        // 可能的异常来源：
+        //   - reader_->read()：磁盘 I/O 错误、文件被外部修改/删除
+        //   - fifo_->prepareToWrite() / finishedWrite()：通常不抛异常（无锁算法）
+        //   - std::memcpy：段错误（理论上不会，因为 buffer 已在 open() 中分配足够空间）
+        //
+        // 处理方式：记录错误信息，设置 running_ = false 使线程退出
+        // 不重新抛出异常（C++ 析构函数不会自动 join 线程，uncaught exception 会导致 std::terminate）
+        spdlog::error("解码线程异常（std::exception）：{}", e.what());
+        running_.store(false);
+    } catch (...) {
+        // ============================================================
+        // 异常处理：捕获非 std::exception 类型的异常
+        // ============================================================
+        // C++ 允许抛出任意类型（int、const char*、自定义类型等），
+        // catch (...) 作为最后的兜底，确保任何异常都不会逃逸出线程函数
+        spdlog::error("解码线程发生未知异常（非 std::exception 类型）");
+        running_.store(false);
+    }
 }

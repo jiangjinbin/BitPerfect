@@ -48,8 +48,8 @@ struct FileInfo {
     double sample_rate = 44100.0;     // 采样率（Hz），如 44100.0、48000.0、96000.0
     int num_channels = 2;             // 声道数，1 = 单声道，2 = 立体声
     int bit_depth = 16;               // 位深（bits/sample），如 16、24、32
-    juce::int64 total_samples = 0;    // 总采样帧数（所有声道合并计算，一帧 = 一次采样时刻的所有声道采样点之和）
-    double duration_seconds = 0.0;   // 时长（秒），由 total_samples / sample_rate 计算得出
+    juce::int64 total_frames = 0;     // 总采样帧数（有多少个采样时刻，不是"采样点数 × 声道数"。一帧 = 同一时刻所有声道的采样点算作 1 帧，如立体声 t=0 时刻 {L,R} 算 1 帧。文件时长 = total_frames / sample_rate）
+    double duration_seconds = 0.0;   // 时长（秒），由 total_frames / sample_rate 计算得出
     std::string format_name;          // 格式名称（如 "FLAC"、"WAV"），由 AudioFormatReader 提供
 };
 
@@ -178,7 +178,7 @@ public:
      * 跳转到指定采样位置
      *
      * 实现流程：
-     *   1. 验证 sample_position 在 [0, total_samples] 范围内
+     *   1. 验证 sample_position 在 [0, total_frames] 范围内
      *   2. 调用 stopDecoding() 暂停当前解码
      *   3. 重置 AbstractFifo 读写指针
      *   4. 调用 reader_->setPosition(sample_position) 更新文件读取位置

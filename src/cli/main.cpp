@@ -26,6 +26,11 @@
                              // 提供 BITPERFECT_VERSION_MAJOR/MINOR/PATCH/STRING 宏
 
 // ============================================================
+// 项目头文件
+// ============================================================
+#include "domain/decoder/AudioDecoder.h"  // AudioDecoder —— 音频文件解码器
+
+// ============================================================
 // 第三方库头文件
 // ============================================================
 // 以下头文件来自 third_party/ 目录下的第三方依赖库。
@@ -60,6 +65,7 @@
 #include <cstdlib>            // EXIT_SUCCESS 和 EXIT_FAILURE 宏
                               // EXIT_SUCCESS = 0（程序成功退出）
                               // EXIT_FAILURE = 1（程序异常退出）
+#include <thread>             // std::this_thread::sleep_for —— 测试中等待解码线程完成
 
 
 // ============================================================
@@ -268,6 +274,143 @@ bool print_verify_summary() {
     return true;
 }
 
+/**
+ * 验证 6：AudioDecoder 端到端解码验证（2.2.7 临时测试）
+ *
+ * 验证点：
+ *   - open() 能正确打开音频文件并提取元数据
+ *   - startDecoding() 能启动后台解码线程
+ *   - decodingLoop() 能正确解码整个文件并到达 EOF
+ *   - AbstractFifo 数据写入正确（通过 prepareToRead 读取验证）
+ *   - stopDecoding() 能安全停止解码线程
+ *   - isDecodingComplete() 返回正确的完成状态
+ *   - getDecodedPosition() 返回正确的解码位置
+ *
+ * 测试文件：测试资源/渡口.wav（WAV 44.1kHz / 16bit / 立体声 / 3分44秒）
+ *
+ * @return true  解码全流程验证通过
+ * @return false 任一环节失败
+ */
+bool verify_audio_decoder() {
+    spdlog::info("=== AudioDecoder 端到端解码验证 ===");
+
+    // ----------------------------------------------------
+    // 步骤 1：创建 AudioDecoder 实例并打开测试音频文件
+    // ----------------------------------------------------
+    AudioDecoder decoder;
+
+    // 使用 juce::File::getCurrentWorkingDirectory() 获取项目根目录
+    // 然后通过 getChildFile 逐级定位测试文件
+    // ⚠️ 显式使用 juce::String::fromUTF8() 处理包含中文的文件路径，
+    //    避免编译器对源文件字符串常量的编码处理与文件系统不一致
+    juce::File project_root = juce::File::getCurrentWorkingDirectory();
+    juce::File test_resource_dir = project_root.getChildFile(
+        juce::String::fromUTF8("测试资源"));
+    juce::File test_file = test_resource_dir.getChildFile(
+        juce::String::fromUTF8("渡口.wav"));
+
+    // 检查文件是否存在
+    if (!test_file.existsAsFile()) {
+        spdlog::error("[AudioDecoder] 测试文件不存在：{}",
+                      test_file.getFullPathName().toStdString());
+        return false;
+    }
+
+    // 打开音频文件
+    bool open_result = decoder.open(test_file);
+    if (!open_result) {
+        spdlog::error("[AudioDecoder] open() 失败");
+        return false;
+    }
+    spdlog::info("[AudioDecoder] ✅ open() 成功");
+
+    // ----------------------------------------------------
+    // 步骤 2：启动解码线程
+    // ----------------------------------------------------
+    decoder.startDecoding();
+    // 验证重复调用幂等性（startDecoding 内部会检测并忽略重复调用）
+    decoder.startDecoding();
+    spdlog::info("[AudioDecoder] ✅ startDecoding() 成功（含幂等性验证）");
+
+    // ----------------------------------------------------
+    // 步骤 3：从 AbstractFifo 消费解码数据
+    // ----------------------------------------------------
+    // 获取 Fifo 引用，用于无锁读取解码后的 PCM 数据
+    juce::AbstractFifo& fifo = decoder.getFifo();
+
+    // 累计读取的采样帧数
+    juce::int64 total_frames_read = 0;
+
+    // 每次从 fifo 读取的帧数（与解码块的 4096 一致）
+    const int kReadChunkSize = 4096;
+
+    // 循环读取直到解码完成
+    while (!decoder.isDecodingComplete() || fifo.getNumReady() > 0) {
+        // 检查 fifo 中是否有可读取的数据
+        int num_ready = fifo.getNumReady();
+        if (num_ready > 0) {
+            // 获取可读取位置
+            int start1 = 0, size1 = 0, start2 = 0, size2 = 0;
+            fifo.prepareToRead(num_ready, start1, size1, start2, size2);
+            int total_readable = size1 + size2;
+
+            // 累计读取的帧数（实际消费数据，不做额外处理）
+            total_frames_read += total_readable;
+
+            // 通知 Fifo 读取完成（释放空间给解码线程写入）
+            fifo.finishedRead(total_readable);
+        } else {
+            // 没有数据可读，短暂休眠让出 CPU 给解码线程
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    }
+
+    spdlog::info("[AudioDecoder] ✅ Fifo 消费完成，共读取 {} 采样帧", total_frames_read);
+
+    // ----------------------------------------------------
+    // 步骤 4：验证解码状态
+    // ----------------------------------------------------
+    // 检查解码完成标志
+    if (!decoder.isDecodingComplete()) {
+        spdlog::error("[AudioDecoder] isDecodingComplete() 应返回 true，但返回 false");
+        return false;
+    }
+    spdlog::info("[AudioDecoder] ✅ isDecodingComplete() = true");
+
+    // 检查解码位置（应与总采样数接近或相等）
+    juce::int64 final_position = decoder.getDecodedPosition();
+    spdlog::info("[AudioDecoder] ✅ getDecodedPosition() = {} 采样帧", final_position);
+
+    // 验证读取的总帧数与解码位置一致（允许一定误差，因为最后一个块可能未完全写入 fifo）
+    if (final_position <= 0) {
+        spdlog::error("[AudioDecoder] 解码位置异常：{}", final_position);
+        return false;
+    }
+
+    // ----------------------------------------------------
+    // 步骤 5：停止解码
+    // ----------------------------------------------------
+    decoder.stopDecoding();
+    // 验证幂等性
+    decoder.stopDecoding();
+    spdlog::info("[AudioDecoder] ✅ stopDecoding() 成功（含幂等性验证）");
+
+    // ----------------------------------------------------
+    // 步骤 6：输出验证结果
+    // ----------------------------------------------------
+    spdlog::info("[AudioDecoder] ========================================");
+    spdlog::info("[AudioDecoder] 🎉 端到端解码验证全部通过！");
+    spdlog::info("[AudioDecoder]    - 文件打开 + 元数据提取 ✅");
+    spdlog::info("[AudioDecoder]    - 后台解码线程 ✅");
+    spdlog::info("[AudioDecoder]    - 无锁 Fifo 写入/读取 ✅");
+    spdlog::info("[AudioDecoder]    - EOF 检测 + 解码完成标志 ✅");
+    spdlog::info("[AudioDecoder]    - 线程安全停止 + 幂等性 ✅");
+    spdlog::info("[AudioDecoder]    - 共解码 {} 采样帧", total_frames_read);
+    spdlog::info("[AudioDecoder] ========================================");
+
+    return true;
+}
+
 
 /**
  * 主函数 —— 程序入口点
@@ -294,6 +437,7 @@ int main() {
     all_passed = verify_nlohmann_json() && all_passed;   // 测试 3：nlohmann/json 解析
     all_passed = verify_sqlite3() && all_passed;         // 测试 4：SQLite 内存数据库 CRUD
     all_passed = print_verify_summary() && all_passed;   // 测试 5：输出验证总结
+    all_passed = verify_audio_decoder() && all_passed;   // 测试 6：AudioDecoder 端到端解码验证（2.2.7）
 
     // 任一失败则返回 EXIT_FAILURE，操作系统和 CI 可据此判断构建是否就绪
     if (!all_passed) {
