@@ -229,6 +229,16 @@ public:
     [[nodiscard]] juce::int64 getDecodedPosition() const;
 
     /**
+     * 获取当前打开文件的元信息
+     *
+     * @return FileInfo 结构体的常量引用（只读），包含采样率、声道数、位深、总帧数、时长、格式名
+     *         若 open() 尚未调用或调用失败，返回默认初始化的 FileInfo
+     *
+     * 线程约束：任意线程安全（file_info_ 仅在 open() 中写入，之后所有线程只读）
+     */
+    [[nodiscard]] const FileInfo& getFileInfo() const;
+
+    /**
      * 注册解码事件监听器
      *
      * 将 listener 加入 listeners_ 列表。同一 listener 重复添加会被 ListenerList 忽略。

@@ -6,21 +6,20 @@
  *          decodingLoop() 运行在独立后台线程，
  *          getFifo()/isDecodingComplete()/getDecodedPosition() 可被任意线程安全调用
  *
- * 当前状态（2.2.8）：
- *   - ✅ 构造函数：空体，所有成员已在 AudioDecoder.h 中通过类内初始化赋予安全默认值
- *   - ✅ 析构函数：调用 stopDecoding() 确保线程已终止
- *   - ✅ open()：完整实现（AudioFormatManager 创建 → AudioFormatReader 创建 → 元数据提取 → Fifo 分配）
- *   - ✅ startDecoding()：完整实现（前置检查 + 线程创建 + 原子状态初始化）
- *   - ✅ stopDecoding()：完整实现（原子退出标志 + join 等待 + Fifo 重置）
- *   - ✅ decodingLoop()：完整实现（while 循环读取 → Fifo 阻塞写入 → EOF 检测 → 异常安全）
- *   - ✅ seekTo()：完整实现（越界检查 → stop → 设置 current_position_ → start）
- *   - ✅ getFifo()：已提前实现（返回 *fifo_ 引用，原属 2.2.9，为端到端测试所需）
- *   - ✅ isDecodingComplete()：已提前实现（返回 decoding_complete_.load()，原属 2.2.9）
- *   - ✅ getDecodedPosition()：已提前实现（返回 current_position_.load()，原属 2.2.9）
- *   - ⬜ 其余 2 个方法：空桩实现，等待后续步骤逐步替换
+ * 当前状态（2.2.12）：
+ *   - ✅ 全部 12 个方法均已完整实现，无空桩
  *
- * 后续步骤映射：
- *   2.2.10 → addListener()、removeListener()
+ * 公开方法（11 个）：
+ *   AudioDecoder() / ~AudioDecoder()                          → 构造 + 安全析构
+ *   open()                                                    → 文件解析 + 元数据提取 + 缓冲区分配
+ *   startDecoding() / stopDecoding()                          → 线程生命周期管理
+ *   seekTo()                                                  → 跳转播放位置（含越界检查）
+ *   getFifo() / isDecodingComplete() / getDecodedPosition()   → 状态查询（任意线程安全）
+ *   getFileInfo()                                             → 文件元信息查询（只读）
+ *   addListener() / removeListener()                          → 监听器管理（P0 仅管理列表）
+ *
+ * 私有方法（1 个）：
+ *   decodingLoop()                                            → 解码主循环（后台线程执行，含 EOF 检测 + Fifo 阻塞写入 + 异常安全）
  */
 
 // ============================================================
@@ -82,8 +81,7 @@ AudioDecoder::AudioDecoder() {
  *
  * 执行流程：
  *   1. 调用 stopDecoding() 设置退出标志并 join 解码线程
- *      - 当前（2.2.3）：stopDecoding() 为空桩，无实际操作
- *      - 2.2.6 实现后：stopDecoding() 会安全地停止线程并重置缓冲区
+ *      - stopDecoding() 已完整实现，此处安全等待线程退出并重置缓冲区
  *   2. 析构函数体执行完毕后，C++ 自动按声明逆序析构所有成员变量：
  *      - decoding_thread_：如果线程仍可 join（异常情况），std::thread 析构会调用 std::terminate()
  *                          因此必须先调用 stopDecoding() 确保线程已 join
@@ -99,14 +97,14 @@ AudioDecoder::AudioDecoder() {
  */
 AudioDecoder::~AudioDecoder() {
     // 确保解码线程已退出再析构成员变量
-    // 当前（2.2.3）：stopDecoding() 为空桩，不会 join 线程（线程也尚未创建）
-    // 2.2.6 实现 stopDecoding() 后，此处会正确等待线程退出
+    // stopDecoding() 已完整实现，此处安全等待解码线程退出
     stopDecoding();
 }
 
 
 // ============================================================
-// 公开方法（以下所有方法均为空桩实现，等待后续步骤替换）
+// ============================================================
+// 公开方法（以下所有方法均已完整实现）
 // ============================================================
 
 /**
@@ -335,7 +333,7 @@ void AudioDecoder::startDecoding() {
     // ============================================================
     // 步骤 3：旧线程回收 —— 检测并 join 上一个已结束但未回收的线程
     // ============================================================
-    // 虽然当前 stopDecoding() 是空桩，但在以下场景中仍可能出现 joinable 但 running_ 为 false 的线程：
+    // 在以下场景中可能出现 joinable 但 running_ 为 false 的线程：
     //   - decodingLoop() 内 while(running_) 循环退出，线程函数返回（线程结束）
     //   - 但 decoding_thread_ 对象尚未被 join，处于 joinable 状态
     //   - 此时 running_ 为 false（通过了步骤 2 的检查），但线程尚未回收
@@ -392,7 +390,7 @@ void AudioDecoder::startDecoding() {
     // 线程对象通过移动赋值（=）保存到 decoding_thread_ 成员变量中
     // 移动赋值后，右侧的临时 std::thread 对象变为"空"状态（不可 joinable），析构安全
     //
-    // 注意：当前 decodingLoop() 是空桩（2.2.7 待实现），线程创建后会立即返回
+    // 线程创建后会立即开始执行 decodingLoop()，在独立线程中解码音频数据
     decoding_thread_ = std::thread(&AudioDecoder::decodingLoop, this);
 
     // ============================================================
@@ -483,9 +481,6 @@ void AudioDecoder::stopDecoding() {
 /**
  * 跳转到指定采样位置
  *
- * 当前状态（2.2.3）：空桩实现，不执行任何操作
- * 目标步骤：2.2.8 实现完整的 seek 流程
- *
  * @param sample_position 目标采样帧位置（0-based，从文件开头算起）
  */
 void AudioDecoder::seekTo(juce::int64 sample_position) {
@@ -534,15 +529,9 @@ void AudioDecoder::seekTo(juce::int64 sample_position) {
 /**
  * 获取 AbstractFifo 引用 —— 供音频线程无锁读取 PCM 数据
  *
- * 当前状态（2.2.9）
- * 目标步骤：2.2.9 替换为返回 *fifo_
- *
- * ⚠️ 特别注意：本方法返回引用，不能返回局部变量的引用（会导致悬垂引用 → 未定义行为）。
- *            
- * @return AbstractFifo 的常量引用（当前返回占位对象，非真实数据缓冲）
+ * @return AbstractFifo 的引用
  *
  * 线程约束：任意线程安全。但必须在 open() 之后调用（否则 fifo_ 为 nullptr，行为未定义）。
- *          当前空桩期间无此约束（占位对象始终存在）。
  */
 juce::AbstractFifo& AudioDecoder::getFifo() {
     // 直接返回 fifo_ 指向的 AbstractFifo 对象的引用
@@ -554,9 +543,7 @@ juce::AbstractFifo& AudioDecoder::getFifo() {
 /**
  * 查询解码是否已全部完成
  *
- * 当前状态：2.2.9 替换为返回 decoding_complete_.load()
- *
- * @return 当前始终返回 false（空桩）
+ * @return true 表示解码已全部完成（EOF 已到达），false 表示仍在解码中
  */
 bool AudioDecoder::isDecodingComplete() const {
     // 原子变量 load 操作，任意线程安全读取解码完成状态
@@ -566,19 +553,22 @@ bool AudioDecoder::isDecodingComplete() const {
 /**
  * 查询当前解码位置
  *
- * 当前状态：2.2.9 替换为返回 current_position_.load()
- *
- * @return 当前始终返回 0（空桩），表示尚未开始解码
+ * @return 已解码到的采样帧位置（0-based，从文件开头算起）
  */
 juce::int64 AudioDecoder::getDecodedPosition() const {
     // 原子变量 load 操作，任意线程安全读取当前解码位置
     return current_position_.load();
 }
 
+const FileInfo& AudioDecoder::getFileInfo() const {
+    // 返回 file_info_ 的常量引用（只读），避免 6 个字段的拷贝开销
+    // file_info_ 仅在 open() 中写入（调用方负责在 startDecoding() 之前调用 open()），
+    // 之后所有线程只读访问，无需加锁
+    return file_info_;
+}
+
 /**
  * 注册解码事件监听器
- *
- * 当前状态：2.2.10 已实现
  *
  * P0 阶段说明：addListener/removeListener 仅管理列表，
  * 不会向 listener 发送任何通知。P1 阶段通过 MessageManager::callAsync 实现跨线程通知。
@@ -594,8 +584,6 @@ void AudioDecoder::addListener(Listener* listener) {
 /**
  * 移除解码事件监听器
  *
- * 当前状态：2.2.10 已实现
- *
  * @param listener 要移除的监听器指针
  */
 void AudioDecoder::removeListener(Listener* listener) {
@@ -606,14 +594,16 @@ void AudioDecoder::removeListener(Listener* listener) {
 
 
 // ============================================================
-// 私有方法（以下方法为空桩实现，等待后续步骤替换）
+// ============================================================
+// 私有方法（以下方法均已完整实现）
 // ============================================================
 
 /**
  * 解码线程主循环
  *
- * 当前状态（2.2.7）
- * 目标步骤：2.2.7 实现完整的解码循环逻辑
+ * 将音频文件逐帧解码为 PCM 浮点数据，写入 AbstractFifo 环形缓冲区，
+ * 供音频引擎（或测试程序的消费者线程）无锁读取。循环受 running_ 原子变量控制，
+ * 可通过 stopDecoding() 安全终止。
  *
  * 线程约束：仅由 decoding_thread_ 执行（2.2.5 创建线程后），不直接在其他线程调用
  */
