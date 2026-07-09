@@ -16,15 +16,15 @@ BitPerfect —— 跨平台（macOS / Linux / Windows）本地音乐播放器，
 > 完整规划见 `项目规划/项目进度.md`，修改进度或阶段划分时同步更新该文件及本段。
 
 **当前状态**：第二阶段 — P0 核心验证。第一阶段全部完成 ✅（1.1 需求分析 → 1.7 C++ 编码规范）。2.1 项目工程初始化与 CMake 构建 ✅（13 个文件、7 个 CMakeLists.txt、5 个第三方库集成、CLI 桩代码验证通过）。2.2.1 创建 decoder 模块目录和 CMakeLists.txt ✅（`src/domain/decoder/` 目录 + CMakeLists.txt 骨架，`add_subdirectory(decoder)` 构建链路验证通过）。
-2.2.2 编写 AudioDecoder 类头文件 ✅（`src/domain/decoder/AudioDecoder.h`，250 行，声明 FileInfo 结构体、Listener 内部接口、AudioDecoder 类含 9 个公开方法 + 1 个私有方法 + 10 个私有成员变量）。
+2.2.2 编写 AudioDecoder 类头文件 ✅（`src/domain/decoder/AudioDecoder.h`，250 行，声明 FileInfo 结构体、Listener 内部接口、AudioDecoder 类含 9 个公开方法 + 1 个私有方法 + 10 个私有成员变量。2026-07-09 重构：fifo_buffer_ 类型从 `std::vector<float>` 改为 `juce::AudioBuffer<float>`，与 `decode_buffer_` 类型统一，平面存储逐声道拷贝无需格式转换）。
 2.2.3 实现构造函数和析构函数 ✅（`src/domain/decoder/AudioDecoder.cpp`，约 315 行，构造空体 + 析构调用 stopDecoding() + 10 个空桩方法，每个标注 TODO 指向对应实现步骤）。
-2.2.4 实现 open() 方法 ✅（约 110 行，10 步流程：创建 AudioFormatManager → 注册格式 → 创建 AudioFormatReader → 提取元数据 → 计算时长 → 动态分配 AbstractFifo 和 decode_buffer_。同步修复 4 个编译/运行时兼容性问题：format_manager_ 成员、JUCE 模块链接、target_sources、.cpp 启用。2026-07-09 修复 repeat-open 悬垂指针 bug：新增步骤 0 提前释放 reader_，防止旧 reader_ 中的 AudioFormat 裸指针在旧 format_manager_ 被销毁后悬垂）。
+2.2.4 实现 open() 方法 ✅（约 110 行，10 步流程：创建 AudioFormatManager → 注册格式 → 创建 AudioFormatReader → 提取元数据 → 计算时长 → 动态分配 AbstractFifo、fifo_buffer_（AudioBuffer<float>，num_channels × (sample_rate×0.5) samples）和 decode_buffer_。同步修复 4 个编译/运行时兼容性问题：format_manager_ 成员、JUCE 模块链接、target_sources、.cpp 启用。2026-07-09 修复 repeat-open 悬垂指针 bug：新增步骤 0 提前释放 reader_，防止旧 reader_ 中的 AudioFormat 裸指针在旧 format_manager_ 被销毁后悬垂）。
 2.2.5 实现 startDecoding() 方法 ✅（约 120 行，6 步流程：reader_ 前置检查 → running_ 重复调用守卫 → 旧线程 joinable 回收 → 原子标志初始化 → std::thread 创建 → 成功日志。3 道 Guard 确保线程安全，编译零错误零警告）。
 2.2.6 实现 stopDecoding() 方法 ✅（约 45 行，3 步流程：running_.store(false) 通知退出 → joinable() + join() 等待线程结束 → fifo_->reset() 重置缓冲区。join 在 fifo reset 之前执行避免数据竞争，幂等安全。编译零错误零警告）。
 
 **开发者学习**：✅ 全部完成（C++、音频基础、JUCE、CMake、辅助库、Git，共 29 章，目录见 `项目规划/学习手册/00-目录与学习路线.md`）。
 
-**下一步**：2.2.7 实现 `decodingLoop()` 私有方法 —— while(running_) 循环读取音频帧、写入 AbstractFifo、更新位置、异常安全。2.2 阶段共 14 个子步骤（2.2.1 ✅ → 2.2.2 ✅ → 2.2.3 ✅ → 2.2.4 ✅ → 2.2.5 ✅ → 2.2.6 ✅ → 2.2.7 → ... → 2.2.14），详见 `项目规划/项目进度.md`。
+**下一步**：2.2.7 实现 `decodingLoop()` 私有方法 —— while(running_) 循环读取音频帧、准备写入 AbstractFifo（prepareToWrite 获取声道内可写位置）、逐声道 memcpy 写入 fifo_buffer_、更新位置、异常安全。2.2 阶段共 14 个子步骤（2.2.1 ✅ → 2.2.2 ✅ → 2.2.3 ✅ → 2.2.4 ✅ → 2.2.5 ✅ → 2.2.6 ✅ → 2.2.7 → ... → 2.2.14），详见 `项目规划/项目进度.md`。
 
 **功能优先级**：P0 核心验证（CLI 验证 Float + Integer 双路径，证明 bit-perfect 可行）→ P1 基础播放器（带 UI 的 MVP）→ P2 音乐管理（曲库 + 数据库）→ P3 体验增强与发布 → P4 未来扩展（跨平台 + 高级功能）。详见 `项目规划/需求分析.md` 第二章。
 
