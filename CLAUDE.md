@@ -23,7 +23,7 @@ BitPerfect —— 跨平台（macOS / Linux / Windows）本地音乐播放器，
 - 2.2 解码器模块 ✅（14/14 子步骤全部完成：AudioDecoder 类完整实现，支持 WAV/FLAC 多线程解码、FIFO 缓冲、seek 跳转、Listener 管理；CLI 端到端 7 项测试全通过；单元测试 7 用例 41 断言全通过）
 - 开发者学习 ✅ 全部完成
 
-**下一步**：2.3 独占模式（Hog Mode）实现。
+**下一步**：2.3 音频设备管理（AudioDeviceManager）—— 设备枚举、Hog Mode 独占、采样率切换、物理格式匹配。
 
 要点（基于 CoreAudio HAL 设备测试报告）：
 - CoreAudio HAL 物理层只认 Interleaved，需在音频回调中实现 Planar → Interleaved 转换
