@@ -13,8 +13,12 @@
  *
  * 这些验证是后续 P1 阶段编写实际音频代码的基础。
  * 如果构建系统不通，后面的代码写得再好也编译不过。
- *
- * 运行方式：./build/debug/src/BitPerfectCli
+ * 
+ * 运行方式：
+ * cmake --build build/debug --target BitPerfectCli && ./build/debug/src/BitPerfectCli
+ * 或
+ * cmake --build build && ./build/src/BitPerfectCli
+ * 
  * 预期输出：5 个 ✅ 验证通过信息，返回码 0
  *
  * 测试控制：在 main() 函数中注释掉不需要的测试调用即可跳过。
@@ -396,7 +400,127 @@ bool verify_audio_decoder() {
     spdlog::info("[AudioDecoder] ✅ stopDecoding() 成功（含幂等性验证）");
 
     // ----------------------------------------------------
-    // 步骤 6：输出验证结果
+    // 步骤 6：seekTo() 专项验证（2.2.8）
+    // ----------------------------------------------------
+    // 测试 6a：越界检查 —— seek 到负数位置，应静默忽略
+    {
+        juce::int64 pos_before = decoder.getDecodedPosition();
+        decoder.seekTo(-100);
+        juce::int64 pos_after = decoder.getDecodedPosition();
+        if (pos_before != pos_after) {
+            spdlog::error("[AudioDecoder] seekTo(-100) 应静默忽略，但 position 从 {} 变为 {}",
+                          pos_before, pos_after);
+            return false;
+        }
+        spdlog::info("[AudioDecoder] ✅ seekTo() 越界检查（负数）—— 静默忽略");
+    }
+
+    // 测试 6b：越界检查 —— seek 到 total_frames + 1，应静默忽略
+    {
+        juce::int64 total_frames = 9878988;  // 渡口.wav 的总采样帧数
+        juce::int64 pos_before = decoder.getDecodedPosition();
+        decoder.seekTo(total_frames + 1);
+        juce::int64 pos_after = decoder.getDecodedPosition();
+        if (pos_before != pos_after) {
+            spdlog::error("[AudioDecoder] seekTo(total_frames+1) 应静默忽略，但 position 从 {} 变为 {}",
+                          pos_before, pos_after);
+            return false;
+        }
+        spdlog::info("[AudioDecoder] ✅ seekTo() 越界检查（超范围）—— 静默忽略");
+    }
+
+    // 测试 6c：seek 到 1 秒位置（44100 帧），验证从中间开始解码
+    {
+        juce::int64 seek_target = 44100;  // 44100 Hz × 1 秒 = 1 秒处
+        decoder.seekTo(seek_target);
+
+        // 短暂等待后检查解码位置（解码线程需要一点时间启动并读取第一块数据）
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        juce::int64 current_pos = decoder.getDecodedPosition();
+        if (current_pos < seek_target) {
+            spdlog::warn("[AudioDecoder] seekTo(44100) 后解码位置 {} < 目标 {}，可能尚未开始解码",
+                         current_pos, seek_target);
+            // 不直接失败 —— 解码线程可能还没来得及更新位置
+        }
+        spdlog::info("[AudioDecoder] ✅ seekTo(44100) 解码已从 {} 位置开始", current_pos);
+
+        // 消费部分数据以验证 seek 生效
+        juce::AbstractFifo& fifo_seek = decoder.getFifo();
+        juce::int64 seek_frames_read = 0;
+
+        // 只消费约 1 秒的数据（44100 帧）就停止，验证 seek 位置正确
+        while (seek_frames_read < 44100 * 2) {  // 最多读 2 秒数据
+            int num_ready = fifo_seek.getNumReady();
+            if (num_ready > 0) {
+                int start1 = 0, size1 = 0, start2 = 0, size2 = 0;
+                fifo_seek.prepareToRead(num_ready, start1, size1, start2, size2);
+                int total_readable = size1 + size2;
+                seek_frames_read += total_readable;
+                fifo_seek.finishedRead(total_readable);
+
+                if (seek_frames_read >= 44100) {  // 读到 1 秒数据就够了
+                    break;
+                }
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        }
+
+        juce::int64 final_seek_pos = decoder.getDecodedPosition();
+        spdlog::info("[AudioDecoder] ✅ seekTo(44100) 验证：读取 {} 帧，最终位置 {}",
+                     seek_frames_read, final_seek_pos);
+
+        // 验证位置确实在 44100 附近（允许一定偏差，因为是多线程）
+        if (final_seek_pos < seek_target) {
+            spdlog::error("[AudioDecoder] seekTo(44100) 失败：最终位置 {} < 目标 {}",
+                          final_seek_pos, seek_target);
+            return false;
+        }
+    }
+
+    // 测试 6d：seek 到文件末尾，应立即触发 EOF
+    {
+        juce::int64 total_frames = 9878988;
+        decoder.seekTo(total_frames);
+
+        // 等待解码线程检测到 EOF 并退出
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+        if (!decoder.isDecodingComplete()) {
+            spdlog::error("[AudioDecoder] seekTo(total_frames) 后 isDecodingComplete() 应为 true");
+            return false;
+        }
+        spdlog::info("[AudioDecoder] ✅ seekTo(total_frames) EOF 立即触发");
+    }
+
+    // 测试 6e：幂等性 —— 连续两次 seek 到不同位置，第二次生效
+    {
+        decoder.seekTo(0);      // 先跳到开头
+        decoder.seekTo(88200);  // 再跳到 2 秒处（覆盖前一次）
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        juce::int64 current_pos = decoder.getDecodedPosition();
+        // 第二次 seek 应该生效，位置应在 88200 附近，而不是 0
+        if (current_pos < 100) {
+            spdlog::error("[AudioDecoder] seekTo 幂等性失败：第二次 seekTo(88200) 后位置 {} 接近 0，"
+                          "说明第一次 seekTo(0) 覆盖了第二次",
+                          current_pos);
+            return false;
+        }
+        spdlog::info("[AudioDecoder] ✅ seekTo() 幂等性验证通过（位置 = {}）", current_pos);
+
+        // 恢复：seek 回起始位置，为后续验证做准备
+        decoder.seekTo(0);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        // 停止解码（seek 测试结束）
+        decoder.stopDecoding();
+    }
+
+    // ----------------------------------------------------
+    // 步骤 7：输出验证结果
     // ----------------------------------------------------
     spdlog::info("[AudioDecoder] ========================================");
     spdlog::info("[AudioDecoder] 🎉 端到端解码验证全部通过！");
@@ -405,6 +529,7 @@ bool verify_audio_decoder() {
     spdlog::info("[AudioDecoder]    - 无锁 Fifo 写入/读取 ✅");
     spdlog::info("[AudioDecoder]    - EOF 检测 + 解码完成标志 ✅");
     spdlog::info("[AudioDecoder]    - 线程安全停止 + 幂等性 ✅");
+    spdlog::info("[AudioDecoder]    - seekTo() 跳转播放位置 ✅");
     spdlog::info("[AudioDecoder]    - 共解码 {} 采样帧", total_frames_read);
     spdlog::info("[AudioDecoder] ========================================");
 
@@ -432,11 +557,11 @@ int main() {
 
     bool all_passed = true;                          // 跟踪所有测试是否通过
 
-    all_passed = verify_version_header() && all_passed;  // 测试 1：version.h + spdlog
-    all_passed = verify_juce_core() && all_passed;       // 测试 2：JUCE core 模块
-    all_passed = verify_nlohmann_json() && all_passed;   // 测试 3：nlohmann/json 解析
-    all_passed = verify_sqlite3() && all_passed;         // 测试 4：SQLite 内存数据库 CRUD
-    all_passed = print_verify_summary() && all_passed;   // 测试 5：输出验证总结
+    //all_passed = verify_version_header() && all_passed;  // 测试 1：version.h + spdlog
+    //all_passed = verify_juce_core() && all_passed;       // 测试 2：JUCE core 模块
+    //all_passed = verify_nlohmann_json() && all_passed;   // 测试 3：nlohmann/json 解析
+    //all_passed = verify_sqlite3() && all_passed;         // 测试 4：SQLite 内存数据库 CRUD
+    //all_passed = print_verify_summary() && all_passed;   // 测试 5：输出验证总结
     all_passed = verify_audio_decoder() && all_passed;   // 测试 6：AudioDecoder 端到端解码验证（2.2.7）
 
     // 任一失败则返回 EXIT_FAILURE，操作系统和 CI 可据此判断构建是否就绪

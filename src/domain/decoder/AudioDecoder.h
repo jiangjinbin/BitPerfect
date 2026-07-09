@@ -178,13 +178,19 @@ public:
      * 跳转到指定采样位置
      *
      * 实现流程：
-     *   1. 验证 sample_position 在 [0, total_frames] 范围内
-     *   2. 调用 stopDecoding() 暂停当前解码
-     *   3. 重置 AbstractFifo 读写指针
-     *   4. 调用 reader_->setPosition(sample_position) 更新文件读取位置
-     *   5. 调用 startDecoding() 从新位置恢复解码
+     *   1. 验证 sample_position 在 [0, total_frames] 范围内，越界则静默返回
+     *   2. 调用 stopDecoding() 暂停当前解码（内部包含 join 等待 + Fifo reset）
+     *   3. 将目标位置写入 current_position_ 原子变量（seek 机制的核心）
+     *   4. 调用 startDecoding() 从新位置恢复解码
+     *
+     * seek 机制说明：
+     *   JUCE AudioFormatReader 基类没有 setPosition() 方法，seek 不通过操作 reader 实现，
+     *   而是通过 current_position_ 原子变量在 seekTo() → decodingLoop() 之间传递目标位置。
+     *   decodingLoop() 从 current_position_.load() 读取起始位置，作为 read() 的
+     *   readerStartSample 参数传入，从而实现在指定位置开始解码。
      *
      * @param sample_position 目标采样帧位置（从文件开头算起，0-based）
+     *                        允许等于 total_frames（立即触发 EOF 检测）
      *
      * 线程约束：必须在 open() 成功后调用。越界时无操作（静默忽略）。
      */
@@ -259,7 +265,7 @@ private:
      * 循环逻辑：
      *   while (running_):
      *     1. reader_->read(&decode_buffer_, 0, frames_per_chunk, start_sample, true)
-     *        从当前文件位置读取一帧（4096 frames）
+     *        从当前文件位置读取4096帧（4096 frames）
      *     2. 若返回值 <= 0（文件末尾或错误）：设置 decoding_complete_ = true，退出循环
      *     3. 将 decode_buffer_ 中的数据写入 AbstractFifo（fifo_->write() + memcpy）
      *     4. 更新 current_position_ = reader_->getPosition()
@@ -303,9 +309,15 @@ private:
     // 大小在 open() 中按 num_channels × (sample_rate × 0.5) 秒动态分配
     juce::AudioBuffer<float> fifo_buffer_;
 
+    // --- 每次解码的最大采样帧数 ---
+    // open() 分配 decode_buffer_ 和 decodingLoop() 每次读取都使用此值，
+    // 作为类静态常量确保两处引用同一数据源，避免字面量分散导致不一致。
+    // 4096 是经验值，兼顾内存开销（立体声 32-bit float ≈ 32KB/chunk）和解码效率。
+    static constexpr int kFramesPerChunk = 4096;
+
     // --- 单帧解码临时缓冲 ---
     // reader_->read() 将解码后的 PCM 数据写入此缓冲区。
-    // 大小：num_channels × 4096 frames（每次解码一个 chunk）
+    // 大小：num_channels × kFramesPerChunk frames（每次解码一个 chunk）
     // 类型：juce::AudioBuffer<float>（JUCE 的多声道音频缓冲封装）
     juce::AudioBuffer<float> decode_buffer_;
 

@@ -6,20 +6,20 @@
  *          decodingLoop() 运行在独立后台线程，
  *          getFifo()/isDecodingComplete()/getDecodedPosition() 可被任意线程安全调用
  *
- * 当前状态（2.2.7）：
+ * 当前状态（2.2.8）：
  *   - ✅ 构造函数：空体，所有成员已在 AudioDecoder.h 中通过类内初始化赋予安全默认值
  *   - ✅ 析构函数：调用 stopDecoding() 确保线程已终止
  *   - ✅ open()：完整实现（AudioFormatManager 创建 → AudioFormatReader 创建 → 元数据提取 → Fifo 分配）
  *   - ✅ startDecoding()：完整实现（前置检查 + 线程创建 + 原子状态初始化）
  *   - ✅ stopDecoding()：完整实现（原子退出标志 + join 等待 + Fifo 重置）
  *   - ✅ decodingLoop()：完整实现（while 循环读取 → Fifo 阻塞写入 → EOF 检测 → 异常安全）
+ *   - ✅ seekTo()：完整实现（越界检查 → stop → 设置 current_position_ → start）
  *   - ✅ getFifo()：已提前实现（返回 *fifo_ 引用，原属 2.2.9，为端到端测试所需）
  *   - ✅ isDecodingComplete()：已提前实现（返回 decoding_complete_.load()，原属 2.2.9）
  *   - ✅ getDecodedPosition()：已提前实现（返回 current_position_.load()，原属 2.2.9）
  *   - ⬜ 其余 2 个方法：空桩实现，等待后续步骤逐步替换
  *
  * 后续步骤映射：
- *   2.2.8  → seekTo()
  *   2.2.10 → addListener()、removeListener()
  */
 
@@ -128,6 +128,20 @@ AudioDecoder::~AudioDecoder() {
  */
 bool AudioDecoder::open(const juce::File& file) {
     // ============================================================
+    // 步骤 -1：停止旧的解码线程（防止 repeat-open 数据竞争）
+    // ============================================================
+    // 如果旧文件正在解码中（running_ == true），直接释放 reader_ 会导致
+    // decodingLoop() 中的 reader_->read() 访问已释放的内存（use-after-free）。
+    //
+    // 解决：先调用 stopDecoding() 安全停止解码线程（内部包含：
+    //   running_.store(false) → join() 等待线程退出 → fifo_->reset()）
+    // 然后再安全释放 reader_。
+    //
+    // 首次调用时 running_ 为 false、decoding_thread_ 不可 joinable，
+    // stopDecoding() 是幂等的，不会有副作用。
+    stopDecoding();
+
+    // ============================================================
     // 步骤 0：释放旧 reader_（防止 repeat-open 悬垂指针 bug）
     // ============================================================
     // 背景：reader_ 内部持有指向 AudioFormat 对象的裸指针（JUCE 设计），
@@ -235,11 +249,25 @@ bool AudioDecoder::open(const juce::File& file) {
     // ============================================================
     // decode_buffer_ 是 juce::AudioBuffer<float> 类型，用于接收 reader_->read() 的解码输出
     // setSize(num_channels, num_samples) 分配 num_channels 个声道，
-    // 每个声道 4096 个采样帧的存储空间（4096 是经验值，兼顾内存开销和解码效率）
+    // 每个声道 kFramesPerChunk 个采样帧的存储空间（kFramesPerChunk 是经验值，兼顾内存开销和解码效率）
     //
     // AudioBuffer<float> 内部使用独立的 float 数组存储每个声道的数据（非交错存储），
     // 与 fifo_buffer_ 类型一致，拷贝时直接逐声道 memcpy，无需平面↔交错格式转换
-    decode_buffer_.setSize(file_info_.num_channels, 4096);
+    decode_buffer_.setSize(file_info_.num_channels, kFramesPerChunk);
+
+    // ============================================================
+    // 步骤 9b：重置解码状态（新文件 = 全新的解码会话）
+    // ============================================================
+    // 打开新文件意味着上一轮解码的状态已无意义，必须重置：
+    //   - current_position_：旧文件可能解码到任意位置（如 9,878,988），
+    //     新文件必须从位置 0 开始解码
+    //   - decoding_complete_：旧文件可能已播放完毕（true），
+    //     新文件尚未开始解码，应重置为 false
+    //
+    // 注意：running_ 已在步骤 -1 的 stopDecoding() 中设为 false，
+    //       decoding_thread_ 已在 join() 中回收，无需在此处理
+    current_position_.store(0);
+    decoding_complete_.store(false);
 
     // ============================================================
     // 步骤 10：输出成功日志
@@ -343,11 +371,15 @@ void AudioDecoder::startDecoding() {
     // 上一轮解码可能已到达文件末尾（decoding_complete_ == true），必须重置
     decoding_complete_.store(false);
 
-    // current_position_ 重置为 0（文件起始位置）
-    // 注意：如果是在 seekTo() 中调用的 startDecoding()，
-    // seekTo() 会在调用本方法前通过 reader_->setReadPosition() 设置文件读取位置，
-    // decodingLoop() 从该位置开始读取，并通过 reader_->getReadPosition() 更新此值
-    current_position_.store(0);
+    // current_position_ 保持当前值不变（不在此处重置）：
+    //   - 首次调用（open() 后）：构造时初始化为 0 → decodingLoop() 从头开始解码 ✅
+    //   - seekTo() → startDecoding()：seekTo() 已写入目标位置 → 从指定位置开始解码 ✅
+    //   - stopDecoding() → startDecoding()：保持中断时的位置 → 续播
+    //     （如需从头开始，调用方应先行调用 seekTo(0)）
+    //
+    // ⚠️ 原设计在此处执行 current_position_.store(0) 无条件重置，
+    //    但这会导致 seekTo() 设置的目标位置被覆盖。改为依赖构造函数默认值，
+    //    由不同调用路径自行管理 current_position_ 的值。
 
     // ============================================================
     // 步骤 5：创建解码线程
@@ -457,30 +489,56 @@ void AudioDecoder::stopDecoding() {
  * @param sample_position 目标采样帧位置（0-based，从文件开头算起）
  */
 void AudioDecoder::seekTo(juce::int64 sample_position) {
-    // TODO: 2.2.8 实现以下逻辑：
-    //   1. 验证 sample_position 在 [0, total_frames] 范围内，越界则静默忽略
-    //   2. 调用 stopDecoding() 暂停当前解码
-    //   3. 重置 AbstractFifo 读写指针
-    //   4. 调用 reader_->setPosition(sample_position) 更新文件读取位置
-    //   5. 更新 current_position_
-    //   6. 调用 startDecoding() 从新位置恢复解码
+    // ============================================================
+    // 步骤 1：验证 sample_position 在 [0, total_frames] 范围内
+    // ============================================================
+    // total_frames 在 open() 中从 reader_->lengthInSamples 提取并存入 file_info_
+    // 越界时静默返回，不输出日志（由调用方决定是否报错）
+    // 允许 sample_position == total_frames：表示 seek 到文件末尾，
+    //   decodingLoop 启动后会立即检测 EOF 并退出（不产生解码数据）
+    if (sample_position < 0 || sample_position > file_info_.total_frames) {
+        return;
+    }
 
-    // 抑制"未使用参数"警告
-    (void)sample_position;
+    // ============================================================
+    // 步骤 2：调用 stopDecoding() 暂停当前解码
+    // ============================================================
+    // stopDecoding() 内部依次执行（详见第 399-448 行）：
+    //   a. running_.store(false) —— 通知解码线程退出 while 循环
+    //   b. join() —— 阻塞等待解码线程完全退出（防止数据竞争）
+    //   c. fifo_->reset() —— 重置环形缓冲区读写指针
+    // 因此步骤 3（重置 AbstractFifo）已被 stopDecoding() 内部覆盖，无需重复操作
+    stopDecoding();
 
-    // 当前空桩：无操作
+    // ============================================================
+    // 步骤 3：将目标位置写入 current_position_ 原子变量
+    // ============================================================
+    // 这是 seek 机制的核心：JUCE AudioFormatReader 基类没有 setPosition() 方法，
+    // seek 通过以下链条实现：
+    //   seekTo() → store 到 current_position_
+    //   → startDecoding() 创建新线程 → decodingLoop() 从 current_position_ load 起始位置
+    //   → 作为 readerStartSample 参数传给 reader_->read()
+    //
+    // 写入时机说明：必须在 stopDecoding() 之后（线程已退出）、startDecoding() 之前
+    // 此时没有其他线程访问 current_position_，无数据竞争
+    current_position_.store(sample_position);
+
+    // ============================================================
+    // 步骤 4：调用 startDecoding() 从新位置恢复解码
+    // ============================================================
+    // startDecoding() 会创建新的解码线程执行 decodingLoop()
+    // decodingLoop 从 current_position_（即 sample_position）开始读取
+    startDecoding();
 }
 
 /**
  * 获取 AbstractFifo 引用 —— 供音频线程无锁读取 PCM 数据
  *
- * 当前状态（2.2.3）：空桩实现，返回静态占位对象
+ * 当前状态（2.2.9）
  * 目标步骤：2.2.9 替换为返回 *fifo_
  *
  * ⚠️ 特别注意：本方法返回引用，不能返回局部变量的引用（会导致悬垂引用 → 未定义行为）。
- *            因此空桩期间使用函数局部静态变量（static），其生命周期为整个程序运行期。
- *            这个占位对象在 2.2.9 替换为真实 fifo_ 后即不再使用。
- *
+ *            
  * @return AbstractFifo 的常量引用（当前返回占位对象，非真实数据缓冲）
  *
  * 线程约束：任意线程安全。但必须在 open() 之后调用（否则 fifo_ 为 nullptr，行为未定义）。
@@ -496,8 +554,7 @@ juce::AbstractFifo& AudioDecoder::getFifo() {
 /**
  * 查询解码是否已全部完成
  *
- * 当前状态（2.2.3）：空桩实现，始终返回 false
- * 目标步骤：2.2.9 替换为返回 decoding_complete_.load()
+ * 当前状态：2.2.9 替换为返回 decoding_complete_.load()
  *
  * @return 当前始终返回 false（空桩）
  */
@@ -509,8 +566,7 @@ bool AudioDecoder::isDecodingComplete() const {
 /**
  * 查询当前解码位置
  *
- * 当前状态（2.2.3）：空桩实现，始终返回 0
- * 目标步骤：2.2.9 替换为返回 current_position_.load()
+ * 当前状态：2.2.9 替换为返回 current_position_.load()
  *
  * @return 当前始终返回 0（空桩），表示尚未开始解码
  */
@@ -582,14 +638,17 @@ void AudioDecoder::decodingLoop() {
     int num_channels = file_info_.num_channels;               // 声道数（1 = 单声道，2 = 立体声）
     juce::int64 total_frames = file_info_.total_frames;     // 文件总采样帧数
 
-    // 每次解码的最大采样帧数（与 open() 中 decode_buffer_ 分配大小一致，见第 235 行）
-    const int kFramesPerChunk = 4096;
+    // 每次解码的最大采样帧数，引用类静态常量 kFramesPerChunk（在 AudioDecoder.h 中定义）
 
     // 当前读取位置（从文件开头算起，0-based）
     // ⚠️ 使用局部变量手动追踪位置，而非 reader_->getPosition()
     //    原因：AudioFormatReader 基类没有 getPosition() 方法（JUCE 8.0.14 确认）
     //    每次成功读取 frames_to_read 帧后递增，精确追踪已读取的采样帧数
-    juce::int64 read_position = 0;
+    //
+    // 起始值从 current_position_ 原子变量读取：
+    //   - 正常启动（startDecoding()）：构造函数初始化为 0 → 从头解码
+    //   - seek 后启动（seekTo() → startDecoding()）：seekTo 写入的目标位置 → 从指定处解码
+    juce::int64 read_position = current_position_.load();
 
     // ============================================================
     // 步骤 2：解码主循环（受 running_ 原子变量控制）
@@ -614,7 +673,7 @@ void AudioDecoder::decodingLoop() {
             // ----------------------------------------------------
             // 2b. 计算本次要读取的采样帧数
             // ----------------------------------------------------
-            // 文件最后一帧可能不足 4096 帧，需要动态调整读取数量
+            // 文件最后一帧可能不足 kFramesPerChunk 帧，需要动态调整读取数量
             // 使用 juce::int64 做减法避免整数溢出（total_frames 可达 2^63）
             juce::int64 remaining = total_frames - read_position;
             int frames_to_read = static_cast<int>(
@@ -624,7 +683,7 @@ void AudioDecoder::decodingLoop() {
             // 2c. 从文件解码一段音频数据到 decode_buffer_
             // ----------------------------------------------------
             // read() 参数说明（JUCE AudioFormatReader，6 个参数）：
-            //   &decode_buffer_  —— 目标 AudioBuffer<float>，在 open() 中已分配 4096 帧
+            //   &decode_buffer_  —— 目标 AudioBuffer<float>，在 open() 中已分配 kFramesPerChunk 帧
             //   0                —— 目标 buffer 中的起始写入偏移（从头开始写）
             //   frames_to_read   —— 本次要读取的采样帧数
             //   read_position    —— 文件中起始读取位置（0-based 绝对位置）
