@@ -10,27 +10,26 @@ BitPerfect —— 跨平台（macOS / Linux / Windows）本地音乐播放器，
 
 - 语言：音频核心用 C++（C++17 标准）
 - 编码规范：**必须**遵守 `项目规划/C++编码规范.md`（含命名、类型使用、函数规范、音频线程安全等 13 章）
+- 音频格式：CoreAudio HAL 物理层仅支持 Interleaved（交错）布局，所有 Planar → Interleaved 转换在音频回调中完成，不得在解码线程中做（会增加内存拷贝次数）。详见 `项目规划/CoreAudio-HAL-设备测试报告.md`。
 
 ## 项目进度
 
 > 完整规划见 `项目规划/项目进度.md`，修改进度或阶段划分时同步更新该文件及本段。
 
-**当前状态**：第二阶段 — P0 核心验证。第一阶段全部完成 ✅（1.1 需求分析 → 1.7 C++ 编码规范）。2.1 项目工程初始化与 CMake 构建 ✅（13 个文件、7 个 CMakeLists.txt、5 个第三方库集成、CLI 桩代码验证通过）。2.2.1 创建 decoder 模块目录和 CMakeLists.txt ✅（`src/domain/decoder/` 目录 + CMakeLists.txt 骨架，`add_subdirectory(decoder)` 构建链路验证通过）。
-2.2.2 编写 AudioDecoder 类头文件 ✅（`src/domain/decoder/AudioDecoder.h`，250 行，声明 FileInfo 结构体、Listener 内部接口、AudioDecoder 类含 9 个公开方法 + 1 个私有方法 + 10 个私有成员变量。2026-07-09 重构：fifo_buffer_ 类型从 `std::vector<float>` 改为 `juce::AudioBuffer<float>`，与 `decode_buffer_` 类型统一，平面存储逐声道拷贝无需格式转换）。
-2.2.3 实现构造函数和析构函数 ✅（`src/domain/decoder/AudioDecoder.cpp`，约 315 行，构造空体 + 析构调用 stopDecoding() + 10 个空桩方法，每个标注 TODO 指向对应实现步骤）。
-2.2.4 实现 open() 方法 ✅（约 110 行，10 步流程：创建 AudioFormatManager → 注册格式 → 创建 AudioFormatReader → 提取元数据 → 计算时长 → 动态分配 AbstractFifo、fifo_buffer_（AudioBuffer<float>，num_channels × (sample_rate×0.5) samples）和 decode_buffer_。同步修复 4 个编译/运行时兼容性问题：format_manager_ 成员、JUCE 模块链接、target_sources、.cpp 启用。2026-07-09 修复 repeat-open 悬垂指针 bug：新增步骤 0 提前释放 reader_，防止旧 reader_ 中的 AudioFormat 裸指针在旧 format_manager_ 被销毁后悬垂）。
-2.2.5 实现 startDecoding() 方法 ✅（约 120 行，6 步流程：reader_ 前置检查 → running_ 重复调用守卫 → 旧线程 joinable 回收 → 原子标志初始化 → std::thread 创建 → 成功日志。3 道 Guard 确保线程安全，编译零错误零警告）。
-2.2.6 实现 stopDecoding() 方法 ✅（约 45 行，3 步流程：running_.store(false) 通知退出 → joinable() + join() 等待线程结束 → fifo_->reset() 重置缓冲区。join 在 fifo reset 之前执行避免数据竞争，幂等安全。编译零错误零警告）。
-2.2.7 实现 decodingLoop() 方法 ✅（约 130 行，6 步流程：获取常量 → while(running_) 循环读取 → reader_->read() 解码一帧 → prepareToWrite + 逐声道 memcpy 写入 fifo_buffer_ → finishedWrite 通知 → 更新位置。修正原 TODO 三处 API 差异：read() 需 6 个参数补全 useReaderRightChan、返回值是 bool 不能用 <=0 判断 EOF（改用 read_position >= total_frames 手动追踪）、reader_ 基类无 getPosition() 方法（改用局部变量）。Fifo 满时阻塞等待 + running_ 检查。两级 try/catch 异常保护。同步提前实现 getFifo()/isDecodingComplete()/getDecodedPosition() 三个 getter（原属 2.2.9，均为单行原子操作，端到端测试必需）。CLI 端到端验证通过：渡口.wav 9,878,988 采样帧全部解码，Fifo 消费帧数一致）。
-2.2.8 实现 seekTo() 方法 ✅（约 40 行，4 步流程：越界检查 → stopDecoding() → current_position_.store() → startDecoding()。发现并修正了原始 TODO 中 3 处冲突：① reader_->setPosition() 不存在（JUCE 基类无此方法，改为通过 current_position_ 原子变量传递目标位置到 decodingLoop()）、② startDecoding() 无条件重置 current_position_ 为 0（改为保持当前值不变）、③ decodingLoop() 硬编码 read_position = 0（改为 current_position_.load() 读取起始位置）。CLI 端到端 6 项验证通过：越界检查（负数/超范围静默忽略）、seek 到 1 秒处、seek 到文件末尾 EOF 立即触发、幂等性）。
-2.2.10 实现 Listener 管理方法 ✅（约 10 行，addListener() 调用 listeners_.add() / removeListener() 调用 listeners_.remove()。P0 阶段仅管理列表，不触发回调。CLI 验证 6 项通过：添加 / 重复添加 / 移除 / 移除不存在项 / 重新添加 / P0 无回调。编译零错误零警告）。
-2.2.11 更新 CMake 构建系统 ✅（修改 4 个文件：① decoder/CMakeLists.txt 注释从"待完成"更新为当前状态；② 根 CMakeLists.txt 新增 find_package(Threads REQUIRED)；③ src/CMakeLists.txt 链接 Threads::Threads；④ tests/CMakeLists.txt 新增解码器源文件 + 4 个 JUCE 模块 + Threads::Threads，为 2.2.14 单元测试做好准备。编译 0 错误 0 警告，CLI 端到端 7 项验证全通过）。
-2.2.12 更新 CLI 测试程序 ✅（修改 3 个文件：① AudioDecoder.h 新增 getFileInfo() 公开 getter 声明（+13 行）；② AudioDecoder.cpp 新增 getFileInfo() 实现 + 清理 15 处过时注释（含文件头状态更新）；③ main.cpp 完全重写（636 行 → 501 行，5 个辅助函数 + 7 个测试函数 + main 编排）。新增 7 项端到端测试：WAV/FLAC 文件打开与元数据提取、WAV/FLAC 全解码帧数验证、seekTo 四种场景、Listener 管理六种场景、错误处理。编译 0 错误 0 警告，运行 7/7 全部通过，退出码 0。消除硬编码 total_frames 魔法数字，统一使用 getFileInfo() 动态获取。函数命名从 snake_case 切换为 camelCase 以符合编码规范）。
-2.2.14 编写单元测试 ✅（新建 tests/domain/test_audio_decoder.cpp：320 行，3 个辅助函数（locateTestFile 向上搜索 + consumeFifoData + consumeAllDecodedFrames）+ 6 个 TEST_CASE + 3 个 SECTION。修改 tests/CMakeLists.txt 启用 BP_TEST_DOMAIN。测试覆盖：WAV/FLAC 文件信息验证、WAV/FLAC 全量解码帧数一致性、不存在文件错误处理、seekTo 越界保护与合法跳转。编译 0 错误 0 警告，全部 7 个测试用例通过（41 个断言），含 1 个 smoke test）。
+**当前状态**：第二阶段 — P0 核心验证。
 
-**开发者学习**：✅ 全部完成（C++、音频基础、JUCE、CMake、辅助库、Git，共 29 章，目录见 `项目规划/学习手册/00-目录与学习路线.md`）。
+- 第一阶段（1.1→1.7）✅ 全部完成
+- 2.1 工程初始化与 CMake 构建 ✅
+- 2.2 解码器模块 ✅（14/14 子步骤全部完成：AudioDecoder 类完整实现，支持 WAV/FLAC 多线程解码、FIFO 缓冲、seek 跳转、Listener 管理；CLI 端到端 7 项测试全通过；单元测试 7 用例 41 断言全通过）
+- 开发者学习 ✅ 全部完成
 
-**下一步**：2.3 独占模式（Hog Mode）实现。2.2.9 三个 getter 已提前完成（2.2.7 端到端测试需要）。2.2.13 测试音频文件已准备完毕 ✅。2.2 阶段全部完成（14/14 个子步骤：2.2.1 ✅ → 2.2.2 ✅ → 2.2.3 ✅ → 2.2.4 ✅ → 2.2.5 ✅ → 2.2.6 ✅ → 2.2.7 ✅ → 2.2.8 ✅ → 2.2.10 ✅ → 2.2.11 ✅ → 2.2.12 ✅ → 2.2.14 ✅），详见 `项目规划/项目进度.md`。
+**下一步**：2.3 独占模式（Hog Mode）实现。
+
+要点（基于 CoreAudio HAL 设备测试报告）：
+- CoreAudio HAL 物理层只认 Interleaved，需在音频回调中实现 Planar → Interleaved 转换
+- 通过 `kAudioStreamPropertyPhysicalFormats` 查询设备能力，实现格式匹配
+- 优先使用 Integer + NonMixable 格式实现 bit-perfect（SMSL DAC 已验证支持）
+- 设备操作（Hog Mode/采样率切换/格式设置）在 UI 线程执行，**禁止**在音频实时线程调用 CoreAudio API
 
 **功能优先级**：P0 核心验证（CLI 验证 Float + Integer 双路径，证明 bit-perfect 可行）→ P1 基础播放器（带 UI 的 MVP）→ P2 音乐管理（曲库 + 数据库）→ P3 体验增强与发布 → P4 未来扩展（跨平台 + 高级功能）。详见 `项目规划/需求分析.md` 第二章。
 
@@ -57,3 +56,89 @@ BitPerfect —— 跨平台（macOS / Linux / Windows）本地音乐播放器，
 |------|------|--------|------|------|------|------|
 | `测试资源/鸳鸯戏.flac` | FLAC | 48kHz | 24bit | 立体声 | 3分31秒 | 流行歌曲，用于 FLAC 解码验证 |
 | `测试资源/渡口.wav` | WAV | 44.1kHz | 16bit | 立体声 | 3分44秒 | 蔡琴经典试音曲，用于 WAV 解码验证 |
+
+## 设备与格式参考
+
+> 测试报告：[项目规划/CoreAudio-HAL-设备测试报告.md](项目规划/CoreAudio-HAL-设备测试报告.md)
+> 测试工具：`test_coreaudio_format/`（独立于主项目的 CoreAudio HAL 验证工具，可复现所有数据）
+
+### 关键发现
+
+1. **所有输出设备只支持 Interleaved（交错）格式**：4 台设备、73 种物理格式，Planar 数量为 0。CoreAudio HAL 物理层不认 Planar。
+2. **JUCE 回调给的是 Planar**：`audioDeviceIOCallbackWithContext` 的 `outputChannelData` 是 `float* const*`（每声道独立数组），与 HAL 要求的 Interleaved 不匹配。
+3. **只有内置扬声器使用 Float**：Mac mini 扬声器是唯一的 Float 数据类型设备；所有外置 DAC（SMSL/D5/Studio Display）都是 Integer。
+4. **SMSL USB AUDIO 是核心测试 DAC**：支持 44.1k～768kHz、24/32bit Integer、含 NonMixable 直通格式，是 BitPerfect 验证的最佳目标设备。
+5. **NonMixable 标志可用于直通**：SMSL 和 Studio Display 部分格式带有 `kAudioFormatFlagIsNonMixable`，设置此标志可绕过系统混音器。
+
+### 对开发的指导
+
+#### JUCE AudioFormatReader 支持两种解码输出
+
+JUCE 的 `AudioFormatReader::read()` 有**两个重载**：
+
+| 重载 | 输出类型 | 数据范围 | 当前 AudioDecoder 使用情况 |
+|------|---------|---------|--------------------------|
+| `read(float* const*, ...)` | Planar Float | [-1.0, +1.0] | ✅ 当前使用（`decode_buffer_` 是 `AudioBuffer<float>`） |
+| `read(int* const*, ...)` | Planar Int32 | [-0x80000000, 0x7fffffff] | ❌ 未使用，但可直接调用 |
+
+`int` 重载的描述（[juce_AudioFormatReader.h:105-110]）：*"If the format is fixed-point, each channel will be written as an array of 32-bit signed integers using the full range -0x80000000 to 0x7fffffff, regardless of the source's bit-depth."*
+
+#### 对 Integer 路径（Path B）的影响
+
+Integer 路径可以在**解码层就直接拿 int 数据**，不需要 float→int 转换：
+
+- **解码阶段**：调用 `reader->read(int**, ...)` 直接获取 Planar Int32 PCM，数据范围始终是 int32 满幅，与源文件位深无关（16bit/24bit 文件会自动扩展到 int32）
+- **音频回调阶段**：只需做 **int32 → 目标位深缩减 + Planar → Interleaved** 转换，然后直接写入 DAC 缓冲区
+
+这意味着 Integer 路径的真正数据流是：
+
+```
+文件 → JUCE read(int**) → Planar Int32 → 位深匹配(32→24/16) + Interleave → CoreAudio HAL NonMixable → DAC
+```
+
+**全程零浮点**，不需要绕过 JUCE。
+
+#### 2.3 独占模式（Hog Mode）必须处理的格式转换
+
+JUCE 回调给的是 **Planar Float**，HAL 要的是 **Interleaved Integer**（外置 DAC）或 **Interleaved Float**（内置扬声器）。实现 Hog Mode 时必须在音频回调中包含以下转换层：
+
+- **Float 路径（Path A）**：Planar Float → Interleave → Interleaved Float（内置扬声器，直接交错排列即可）或 Planar Float → Interleave → Interleaved Float（外置 DAC，CoreAudio 内部自动做 float→int 转换，我们只需 interleave）
+- **Integer 路径（Path B）**：解码阶段用 `reader->read(int**, ...)` 获取 Planar Int32 → 音频回调中做位深匹配 + Interleave → Interleaved Int16/Int24/Int32 → 直接写入 DAC 物理格式缓冲区（配合 NonMixable 绕过系统混音器，实现 bit-perfect）
+
+#### 各设备 Integer 格式能力速查表
+
+以下数据来自 `test_coreaudio_format` 工具对各设备的 `kAudioStreamPropertyAvailablePhysicalFormats` 实际查询结果（2026-07-10）：
+
+| 设备 | int16 | int20 | int24 | int32 | NonMixable | Float |
+|------|:---:|:---:|:---:|:---:|:---:|:---:|
+| **SMSL USB AUDIO** ⭐ | ❌ | ❌ | ✅（20 种） | ✅（20 种） | ✅（20/40） | ❌ |
+| D5 | ✅（7 种） | ✅（7 种） | ✅（7 种） | ❌ | ❌ | ❌ |
+| Studio Display | ❌ | ❌ | ✅（8 种） | ❌ | ✅（4/8） | ❌ |
+| Mac mini 扬声器 | ❌ | ❌ | ❌ | ❌ | ❌ | ✅（4 种） |
+
+> 💡 这意味着：SMSL 不能用 int16（没有对应物理格式）；D5 不能用 int32（最大 24bit）；Mac mini 扬声器根本不能走 Integer 路径。
+
+#### 设备格式匹配策略
+
+播放前按以下流程选择目标物理格式：
+
+1. **读取源文件属性**：采样率 + 位深（16/24/32bit）
+2. **由用户 Hog Mode 开关决定 NonMixable**：Hog Mode 开启 → 只选带 NonMixable 标志的物理格式；Hog Mode 关闭 → 只选不带 NonMixable 的格式。NonMixable 是 Hog Mode 在流格式层的体现，不是设备自动选择项。
+3. **Integer 路径（Path B）位深匹配**（在已筛选的格式中选，主流 DAC 都有 32bit，直接选即可）：
+   - 32bit Integer（JUCE 输出就是 int32，直接零转换喂给 DAC）
+   - 若无 Integer 格式 → 回退 Float 路径
+4. **Float 路径（Path A）回退**：当设备不支持 Integer 格式时（如 Mac mini 扬声器），使用 Float32 格式，CoreAudio 内部隐式转换
+
+#### 位深匹配转换简表
+
+JUCE `read(int**, ...)` 统一输出 int32。主流 DAC 都支持 32bit Integer 物理格式，选它即可零转换。
+
+| 场景 | 目标物理格式 | 回调中做什么 |
+|------|:---:|------|
+| 外置 DAC（SMSL 等，有 32bit） | 32bit Integer（Hog Mode 下加 NonMixable） | **零转换**：Planar int32 → Interleave → 写入 |
+| 内置扬声器（无 Integer） | — | 无法走 Integer 路径，回退 Float 路径 |
+
+#### 测试验证优先级
+
+1. **SMSL USB AUDIO**（默认设备，格式最全，优先测试 Integer Mode）
+2. Mac mini 扬声器（验证 Float 路径回退逻辑）
