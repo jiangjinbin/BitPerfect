@@ -202,7 +202,7 @@ public:
      * AbstractFifo 是无锁环形缓冲区，音频实时线程可以安全地调用其 read() 方法
      * 而不会违反"禁止加锁"的硬实时约束。
      *
-     * @return AbstractFifo 的常量引用（调用方通过它读取已解码的 PCM 数据）
+     * @return AbstractFifo 的引用（调用方通过它读取已解码的 PCM 数据，需要调用 prepareToRead/finishedRead 等非 const 方法）
      *
      * 线程约束：任意线程安全。但必须在 open() 之后调用（否则 fifo_ 为 nullptr，行为未定义）。
      */
@@ -348,8 +348,9 @@ private:
     std::atomic<bool> decoding_complete_{false};
 
     // current_position_：当前已解码到的采样帧位置
-    //   - 由 decodingLoop() 在每帧解码后更新
-    //   - seekTo() 调用 reader_->setPosition() 后同步更新此值
+    //   - 由 decodingLoop() 在每 chunk 解码后更新
+    //   - seekTo() 通过 stopDecoding() → store 目标位置 → startDecoding()
+    //     → decodingLoop() 从 current_position_.load() 读取起始位置
     //   - getDecodedPosition() 返回此值（任意线程安全读取）
     std::atomic<juce::int64> current_position_{0};
 

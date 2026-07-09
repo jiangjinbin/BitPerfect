@@ -6,10 +6,10 @@
  *          decodingLoop() 运行在独立后台线程，
  *          getFifo()/isDecodingComplete()/getDecodedPosition() 可被任意线程安全调用
  *
- * 当前状态（2.2.12）：
+ * 当前状态（2.2.14）：
  *   - ✅ 全部 12 个方法均已完整实现，无空桩
  *
- * 公开方法（11 个）：
+ * 公开方法（12 个）：
  *   AudioDecoder() / ~AudioDecoder()                          → 构造 + 安全析构
  *   open()                                                    → 文件解析 + 元数据提取 + 缓冲区分配
  *   startDecoding() / stopDecoding()                          → 线程生命周期管理
@@ -35,8 +35,9 @@
 // ============================================================
 // C++ 标准库
 // ============================================================
-#include <chrono>   // std::chrono::milliseconds —— 解码线程等待 fifo 空间时的休眠时长
-#include <cstring>  // std::memcpy —— 逐声道拷贝 PCM 数据
+#include <cassert>   // assert —— getFifo() 运行时空指针检查（debug 构建中捕获误用）
+#include <chrono>    // std::chrono::milliseconds —— 解码线程等待 fifo 空间时的休眠时长
+#include <cstring>   // std::memcpy —— 逐声道拷贝 PCM 数据
 
 
 // ============================================================
@@ -155,6 +156,26 @@ bool AudioDecoder::open(const juce::File& file) {
     //
     // 首次调用时 reader_ 为 nullptr，reset(nullptr) 是安全的空操作。
     reader_.reset();
+
+    // ============================================================
+    // 步骤 0b：重置所有可变状态为默认值（与 reader_.reset() 对称）
+    // ============================================================
+    // 背景：reader_ 已释放，旧文件的解码上下文不再有效。为防止后续步骤
+    //   （如 createReaderFor）失败导致对象处于"reader_ 为空但 file_info_
+    //   保留旧数据"的不一致状态，在此处将所有与旧文件关联的状态统一重置。
+    //
+    // 如果 open() 最终成功，这些字段将在步骤 5-9b 中被新文件的数据覆盖；
+    // 如果 open() 中途失败，调用方通过 getFileInfo() 等查询方法看到的是
+    // 干净的默认值（而非旧文件的幽灵数据）。
+    //
+    // 重置项说明：
+    //   - file_info_：元数据（采样率/声道/位深/总帧数/时长/格式名）归零
+    //   - current_position_：解码位置归零（新文件从头开始）
+    //   - decoding_complete_：标记为未完成（新文件尚未开始解码）
+    //   - running_ 已由 stopDecoding() 设为 false，无需重复操作
+    file_info_ = FileInfo{};                   // 重置为默认值（44100, 2, 16, 0, 0.0, ""）
+    current_position_.store(0);               // 解码位置归零
+    decoding_complete_.store(false);          // 标记为未完成
 
     // ============================================================
     // 步骤 1：创建 AudioFormatManager 并注册基本音频格式
@@ -398,7 +419,7 @@ void AudioDecoder::startDecoding() {
     // ============================================================
     // spdlog::info 输出信息日志，包含当前文件的音频参数
     // 这些参数来自 file_info_（open() 中填充），在此处为只读访问（无竞态问题）
-    // 日志格式与 open() 中的成功日志保持一致（见本文件第 214-218 行）
+    // 日志格式与 open() 中的成功日志保持一致（见本文件第 297-301 行）
     // {} 格式符用于 sample_rate（double 类型，spdlog 会格式化为 44100 而非 44100.0）
     spdlog::info("startDecoding()：解码线程已启动（{} Hz / {} 声道 / {} bit）",
                  file_info_.sample_rate, file_info_.num_channels, file_info_.bit_depth);
@@ -498,7 +519,7 @@ void AudioDecoder::seekTo(juce::int64 sample_position) {
     // ============================================================
     // 步骤 2：调用 stopDecoding() 暂停当前解码
     // ============================================================
-    // stopDecoding() 内部依次执行（详见第 399-448 行）：
+    // stopDecoding() 内部依次执行（详见第 450-500 行）：
     //   a. running_.store(false) —— 通知解码线程退出 while 循环
     //   b. join() —— 阻塞等待解码线程完全退出（防止数据竞争）
     //   c. fifo_->reset() —— 重置环形缓冲区读写指针
@@ -534,6 +555,11 @@ void AudioDecoder::seekTo(juce::int64 sample_position) {
  * 线程约束：任意线程安全。但必须在 open() 之后调用（否则 fifo_ 为 nullptr，行为未定义）。
  */
 juce::AbstractFifo& AudioDecoder::getFifo() {
+    // 运行时断言：确保 open() 已被成功调用（fifo_ 不为空）
+    // assert 仅在 debug 构建中生效，release 构建中被编译器移除（零性能开销）
+    // 这能帮助开发者在 debug 阶段尽早发现"解码前忘记 open()"的误用
+    assert(fifo_ != nullptr);
+
     // 直接返回 fifo_ 指向的 AbstractFifo 对象的引用
     // AbstractFifo 使用原子变量管理读写指针，任意线程安全访问
     // 音频实时线程可以安全调用 prepareToRead() / finishedRead() 无锁读取 PCM 数据
@@ -771,6 +797,11 @@ void AudioDecoder::decodingLoop() {
         // 不重新抛出异常（C++ 析构函数不会自动 join 线程，uncaught exception 会导致 std::terminate）
         spdlog::error("解码线程异常（std::exception）：{}", e.what());
         running_.store(false);
+        // 设置解码完成标志，通知消费者线程不会再有新数据到来
+        // 如果不设置此标志，消费者使用的 isDecodingComplete() && fifo_empty
+        // 退出条件将永远无法满足（decoding_complete_ 始终为 false），
+        // 导致消费者陷入无限 sleep 循环
+        decoding_complete_.store(true);
     } catch (...) {
         // ============================================================
         // 异常处理：捕获非 std::exception 类型的异常
@@ -779,5 +810,7 @@ void AudioDecoder::decodingLoop() {
         // catch (...) 作为最后的兜底，确保任何异常都不会逃逸出线程函数
         spdlog::error("解码线程发生未知异常（非 std::exception 类型）");
         running_.store(false);
+        // 同上：通知消费者不会再有新数据，防止无限等待
+        decoding_complete_.store(true);
     }
 }

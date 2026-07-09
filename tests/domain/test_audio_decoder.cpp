@@ -110,7 +110,7 @@ juce::File locateTestFile(const std::string& file_name) {
  * 因此本函数可以被任意线程安全调用。
  *
  * 消费模式说明：
- *   AbstractFifo 的 read 方法可能返回两段不连续的数据（因为环形缓冲区
+ *   AbstractFifo 的 prepareToRead / finishedRead 方法可能返回两段不连续的数据（因为环形缓冲区
  *   在末尾会回绕），本函数处理了这种两段场景。
  *
  * @param fifo            要消费的 AbstractFifo 引用
@@ -259,6 +259,7 @@ TEST_CASE("open() 成功读取 WAV 文件信息", "[AudioDecoder]") {
  * FLAC 与 WAV 的区别：
  *   - FLAC 是压缩格式，需要解压才能读取 PCM 数据
  *   - 不同的采样率（48kHz vs 44.1kHz）和位深（24bit vs 16bit）
+ *   - 48kHz 采样率意味着更大的 fifo_buffer_（48k × 0.5 = 24k frames vs 22.05k frames）
  *   - 这验证了 AudioDecoder 的格式无关设计
  *
  * 前置条件：测试资源目录中存在"鸳鸯戏.flac"（48kHz/24bit/立体声）
@@ -355,7 +356,7 @@ TEST_CASE("解码 WAV 到完成（isDecodingComplete() == true）", "[AudioDecod
  * 与测试用例 3 的区别：
  *   - FLAC 是真正需要解压的格式（WAV 本质是 PCM + 头），
  *     这验证了 JUCE AudioFormatReader 的 FLAC 解码路径
- *   - 48kHz 采样率意味着更大的 decode_buffer（48k * 0.5 = 24k frames vs 22.05k frames）
+ *   - 48kHz 采样率意味着更大的 fifo_buffer_（48k × 0.5 = 24k frames vs 22.05k frames）
  *   - 24bit 位深意味着不同的内部数据转换路径
  */
 TEST_CASE("解码 FLAC 到完成", "[AudioDecoder]") {
