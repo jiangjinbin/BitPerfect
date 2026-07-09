@@ -23,7 +23,7 @@
 #include <memory>      // std::unique_ptr —— 独占所有权智能指针（reader_、fifo_）
 #include <string>      // std::string —— FileInfo::format_name、Listener::onDecodingError 参数
 #include <thread>      // std::thread —— 解码后台线程
-#include <vector>      // std::vector<float> —— AbstractFifo 底层存储缓冲区
+// （fifo_buffer_ 已改为 juce::AudioBuffer<float>，不再需要 <vector>）
 
 // ============================================================
 // JUCE 第三方库
@@ -298,8 +298,10 @@ private:
 
     // --- Fifo 底层存储 ---
     // AbstractFifo 只管理读写指针，实际数据需要一个独立的缓冲区来存放。
-    // fifo_buffer_ 是这块内存，大小在 open() 中按 sample_rate × num_channels × 0.5 秒动态分配
-    std::vector<float> fifo_buffer_;
+    // 改为 juce::AudioBuffer<float> 与 decode_buffer_ 类型一致，
+    // 拷贝时无需平面↔交错格式转换，直接逐声道 memcpy。
+    // 大小在 open() 中按 num_channels × (sample_rate × 0.5) 秒动态分配
+    juce::AudioBuffer<float> fifo_buffer_;
 
     // --- 单帧解码临时缓冲 ---
     // reader_->read() 将解码后的 PCM 数据写入此缓冲区。

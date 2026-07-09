@@ -45,7 +45,7 @@
  *
  *   reader_            = nullptr  → 未打开任何文件，资源在 open() 中分配（2.2.4）
  *   fifo_              = nullptr  → 未分配环形缓冲区，资源在 open() 中分配（2.2.4）
- *   fifo_buffer_       = {}       → 空 vector，存储空间在 open() 中分配（2.2.4）
+ *   fifo_buffer_       = {}       → 空 AudioBuffer，存储空间在 open() 中分配（2.2.4）
  *   decode_buffer_     = {}       → 空 AudioBuffer，大小在 open() 中分配（2.2.4）
  *   file_info_         = {}       → 默认 FileInfo{44100.0, 2, 16, 0, 0.0, ""}
  *   running_           = false    → 未开始解码
@@ -83,7 +83,7 @@ AudioDecoder::AudioDecoder() {
  *      - 原子变量（running_/decoding_complete_/current_position_）：无需特殊清理
  *      - file_info_：FileInfo 析构（string 自动释放内存）
  *      - decode_buffer_：AudioBuffer 析构（自动释放内部浮点数组）
- *      - fifo_buffer_：vector 析构（自动释放内存）
+ *      - fifo_buffer_：AudioBuffer 析构（自动释放内部浮点数组）
  *      - fifo_：unique_ptr 析构（自动 delete AbstractFifo 对象）
  *      - reader_：unique_ptr 析构（自动 delete AudioFormatReader，关闭文件句柄）
  *
@@ -197,23 +197,30 @@ bool AudioDecoder::open(const juce::File& file) {
     // ============================================================
     // 步骤 7：动态计算 AbstractFifo 容量
     // ============================================================
-    // 容量公式：采样率 × 声道数 × 0.5（秒）
-    // 这提供了 0.5 秒的预缓冲，在解码速度和音频消费速度之间取得平衡：
-    //   - 太大 → 浪费内存，seek 操作响应慢（需清空更多缓冲数据）
-    //   - 太小 → 解码跟不上消费的风险增加，可能导致音频卡顿
+    // 容量公式：采样率 × 0.5（秒）= 每个声道的采样点数
+    // AbstractFifo 管理单个声道的读写进度（所有声道同步，同一索引），
+    // fifo_buffer_（AudioBuffer<float>）提供 num_channels 个声道，
+    // 每个声道存储 fifo_capacity 个采样点。
     //
-    // 举例：44.1kHz 立体声 → 44100 × 2 × 0.5 = 44100 个 float ≈ 172 KB
-    //       192kHz 立体声 → 192000 × 2 × 0.5 = 192000 个 float ≈ 750 KB
+    // 总内存：num_channels × fifo_capacity × sizeof(float)
+    // 举例：44.1kHz 立体声 → 每声道 44100 × 0.5 = 22050 采样点，
+    //       总内存 = 2 × 22050 × 4 = 172 KB（与旧方案完全一致）
+    //       192kHz 立体声 → 每声道 192000 × 0.5 = 96000 采样点，
+    //       总内存 = 2 × 96000 × 4 = 750 KB
     int fifo_capacity = static_cast<int>(
-        file_info_.sample_rate * static_cast<double>(file_info_.num_channels) * 0.5);
+        file_info_.sample_rate * 0.5);
 
     // ============================================================
     // 步骤 8：分配无锁环形缓冲区
     // ============================================================
     // AbstractFifo 只管理读写指针（原子变量），不持有实际数据
-    // fifo_buffer_ 是 AbstractFifo 的底层存储，大小必须与 Fifo 容量一致
+    // 容量为单声道采样点数，索引表示"第几个采样帧"
     fifo_ = std::make_unique<juce::AbstractFifo>(fifo_capacity);
-    fifo_buffer_.resize(static_cast<size_t>(fifo_capacity));
+
+    // fifo_buffer_ 分配 num_channels 个声道，每声道 fifo_capacity 个采样帧
+    // 与 decode_buffer_ 类型一致（均为 AudioBuffer<float>，平面存储），
+    // 解码循环中从 decode_buffer_ 拷贝到 fifo_buffer_ 时无需格式转换
+    fifo_buffer_.setSize(file_info_.num_channels, fifo_capacity);
 
     // ============================================================
     // 步骤 9：分配单帧解码临时缓冲
@@ -222,7 +229,8 @@ bool AudioDecoder::open(const juce::File& file) {
     // setSize(num_channels, num_samples) 分配 num_channels 个声道，
     // 每个声道 4096 个采样帧的存储空间（4096 是经验值，兼顾内存开销和解码效率）
     //
-    // AudioBuffer<float> 内部使用独立的 float 数组存储每个声道的数据（非交错存储）
+    // AudioBuffer<float> 内部使用独立的 float 数组存储每个声道的数据（非交错存储），
+    // 与 fifo_buffer_ 类型一致，拷贝时直接逐声道 memcpy，无需平面↔交错格式转换
     decode_buffer_.setSize(file_info_.num_channels, 4096);
 
     // ============================================================
@@ -425,7 +433,7 @@ void AudioDecoder::stopDecoding() {
     //   - 如果 open() 从未调用，fifo_ 为 nullptr（头文件类内初始化的默认值）
     //   - 此时跳过 reset，避免空指针解引用
     //
-    // 注意：此处不释放 fifo_buffer_（底层内存）和 decode_buffer_（解码临时缓冲），
+    // 注意：此处不释放 fifo_buffer_（AudioBuffer）和 decode_buffer_（解码临时缓冲），
     // 它们由 open() 在下一次调用时重新分配，或由析构函数自动回收（RAII）
     if (fifo_ != nullptr) {
         fifo_->reset();
@@ -575,11 +583,19 @@ void AudioDecoder::decodingLoop() {
     // TODO: 2.2.7 实现以下逻辑：
     //   while (running_) {
     //       1. reader_->read(&decode_buffer_, 0, frames_per_chunk, start_sample, true)
-    //          从当前文件位置读取一帧（4096 frames）
+    //          从当前文件位置读取一帧（4096 frames），解码到 decode_buffer_ 中
     //       2. 若返回值 <= 0（文件末尾或错误）：设置 decoding_complete_ = true，退出循环
-    //       3. 将 decode_buffer_ 中的数据写入 AbstractFifo：
-    //          - fifo_->write() 获取可写空间
-    //          - memcpy 将 decode_buffer_ 数据拷入 fifo_buffer_
+    //       3. 将 decode_buffer_ 中的数据写入 fifo_buffer_（均为 AudioBuffer<float>）：
+    //          a. 实际读取的采样帧数 = reader_->read() 的返回值
+    //          b. fifo_->prepareToWrite(num_frames, start1, size1, start2, size2)
+    //             获取 fifo_buffer_ 中可写入的声道内位置
+    //          c. 逐声道 memcpy：
+    //             for (ch = 0; ch < num_channels; ++ch) {
+    //                 从 decode_buffer_.getReadPointer(ch)
+    //                 拷入 fifo_buffer_.getWritePointer(ch) + start1
+    //             }
+    //             （AudioBuffer 内部是平面存储，每声道独立数组，直接 memcpy 即可）
+    //          d. fifo_->finishedWrite(size1 + size2)
     //       4. 更新 current_position_ = reader_->getPosition()
     //   }
     //   异常捕获：read() 或 write() 抛出异常时设置 running_ = false，避免崩溃
