@@ -578,42 +578,30 @@ juce::int64 AudioDecoder::getDecodedPosition() const {
 /**
  * 注册解码事件监听器
  *
- * 当前状态（2.2.3）：空桩实现，不执行任何操作
- * 目标步骤：2.2.10 实现监听器列表管理
+ * 当前状态：2.2.10 已实现
  *
- * P0 阶段说明（2.2.10）：addListener/removeListener 仅管理列表，
+ * P0 阶段说明：addListener/removeListener 仅管理列表，
  * 不会向 listener 发送任何通知。P1 阶段通过 MessageManager::callAsync 实现跨线程通知。
  *
  * @param listener 要注册的监听器指针（AudioDecoder 不持有所有权）
  */
 void AudioDecoder::addListener(Listener* listener) {
-    // TODO: 2.2.10 实现以下逻辑：
-    //   listeners_.add(listener);
-    //   juce::ListenerList 自动处理重复添加（同一 listener 只保留一份）
-
-    // 抑制"未使用参数"警告
-    (void)listener;
-
-    // 当前空桩：无操作
+    // 将 listener 加入监听器列表
+    // juce::ListenerList 自动处理重复添加：同一 listener 只保留一份（内部使用链表 + 指针比较）
+    listeners_.add(listener);
 }
 
 /**
  * 移除解码事件监听器
  *
- * 当前状态（2.2.3）：空桩实现，不执行任何操作
- * 目标步骤：2.2.10 实现监听器列表管理
+ * 当前状态：2.2.10 已实现
  *
  * @param listener 要移除的监听器指针
  */
 void AudioDecoder::removeListener(Listener* listener) {
-    // TODO: 2.2.10 实现以下逻辑：
-    //   listeners_.remove(listener);
-    //   juce::ListenerList 自动处理移除不存在的 listener（安全无操作）
-
-    // 抑制"未使用参数"警告
-    (void)listener;
-
-    // 当前空桩：无操作
+    // 将 listener 从监听器列表中移除
+    // juce::ListenerList 自动处理移除不存在的 listener：内部检查后安全无操作
+    listeners_.remove(listener);
 }
 
 

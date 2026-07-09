@@ -520,7 +520,69 @@ bool verify_audio_decoder() {
     }
 
     // ----------------------------------------------------
-    // 步骤 7：输出验证结果
+    // 步骤 7：Listener 管理方法验证（2.2.10）
+    // ----------------------------------------------------
+    {
+        // 测试监听器子类 —— 继承 AudioDecoder::Listener，
+        // 覆盖三个回调方法，统计调用次数（用于验证 P0 阶段不触发回调）
+        struct TestListener : public AudioDecoder::Listener {
+            int started_count = 0;    // onDecodingStarted 被调用次数
+            int completed_count = 0;  // onDecodingComplete 被调用次数
+            int error_count = 0;      // onDecodingError 被调用次数
+
+            void onDecodingStarted() override {
+                ++started_count;
+            }
+
+            void onDecodingComplete() override {
+                ++completed_count;
+            }
+
+            void onDecodingError(const std::string& /*error_message*/) override {
+                ++error_count;
+            }
+        };
+
+        TestListener listener1;
+        TestListener listener2;
+
+        // 1. 验证 addListener 不崩溃
+        decoder.addListener(&listener1);
+        decoder.addListener(&listener2);
+
+        // 2. 验证重复添加不崩溃（juce::ListenerList 自动去重，同一指针只保留一份）
+        decoder.addListener(&listener1);
+        decoder.addListener(&listener1);
+
+        // 3. 验证 removeListener 不崩溃
+        decoder.removeListener(&listener2);
+
+        // 4. 验证移除不存在的 listener 安全无操作（不崩溃）
+        decoder.removeListener(&listener2);
+
+        // 5. 验证移除后重新添加不崩溃（操作幂等、状态稳定）
+        decoder.addListener(&listener2);
+        decoder.removeListener(&listener2);
+
+        // 6. 验证 P0 阶段不会触发任何回调
+        //    因为 decodingLoop / startDecoding / stopDecoding 中均未调用 listeners_.call()
+        if (listener1.started_count != 0 ||
+            listener1.completed_count != 0 ||
+            listener1.error_count != 0) {
+            spdlog::error("[AudioDecoder] ❌ P0 阶段不应触发 Listener 回调，"
+                          "但实际触发了（started={}, completed={}, error={}）",
+                          listener1.started_count,
+                          listener1.completed_count,
+                          listener1.error_count);
+            return false;
+        }
+
+        spdlog::info("[AudioDecoder] ✅ addListener/removeListener 验证通过"
+                     "（含重复添加、移除不存在项、重新添加、P0 无回调）");
+    }
+
+    // ----------------------------------------------------
+    // 步骤 8：输出验证结果
     // ----------------------------------------------------
     spdlog::info("[AudioDecoder] ========================================");
     spdlog::info("[AudioDecoder] 🎉 端到端解码验证全部通过！");
@@ -530,6 +592,7 @@ bool verify_audio_decoder() {
     spdlog::info("[AudioDecoder]    - EOF 检测 + 解码完成标志 ✅");
     spdlog::info("[AudioDecoder]    - 线程安全停止 + 幂等性 ✅");
     spdlog::info("[AudioDecoder]    - seekTo() 跳转播放位置 ✅");
+    spdlog::info("[AudioDecoder]    - addListener/removeListener 管理 ✅");
     spdlog::info("[AudioDecoder]    - 共解码 {} 采样帧", total_frames_read);
     spdlog::info("[AudioDecoder] ========================================");
 
