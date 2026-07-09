@@ -26,10 +26,11 @@ BitPerfect —— 跨平台（macOS / Linux / Windows）本地音乐播放器，
 2.2.10 实现 Listener 管理方法 ✅（约 10 行，addListener() 调用 listeners_.add() / removeListener() 调用 listeners_.remove()。P0 阶段仅管理列表，不触发回调。CLI 验证 6 项通过：添加 / 重复添加 / 移除 / 移除不存在项 / 重新添加 / P0 无回调。编译零错误零警告）。
 2.2.11 更新 CMake 构建系统 ✅（修改 4 个文件：① decoder/CMakeLists.txt 注释从"待完成"更新为当前状态；② 根 CMakeLists.txt 新增 find_package(Threads REQUIRED)；③ src/CMakeLists.txt 链接 Threads::Threads；④ tests/CMakeLists.txt 新增解码器源文件 + 4 个 JUCE 模块 + Threads::Threads，为 2.2.14 单元测试做好准备。编译 0 错误 0 警告，CLI 端到端 7 项验证全通过）。
 2.2.12 更新 CLI 测试程序 ✅（修改 3 个文件：① AudioDecoder.h 新增 getFileInfo() 公开 getter 声明（+13 行）；② AudioDecoder.cpp 新增 getFileInfo() 实现 + 清理 15 处过时注释（含文件头状态更新）；③ main.cpp 完全重写（636 行 → 501 行，5 个辅助函数 + 7 个测试函数 + main 编排）。新增 7 项端到端测试：WAV/FLAC 文件打开与元数据提取、WAV/FLAC 全解码帧数验证、seekTo 四种场景、Listener 管理六种场景、错误处理。编译 0 错误 0 警告，运行 7/7 全部通过，退出码 0。消除硬编码 total_frames 魔法数字，统一使用 getFileInfo() 动态获取。函数命名从 snake_case 切换为 camelCase 以符合编码规范）。
+2.2.14 编写单元测试 ✅（新建 tests/domain/test_audio_decoder.cpp：320 行，3 个辅助函数（locateTestFile 向上搜索 + consumeFifoData + consumeAllDecodedFrames）+ 6 个 TEST_CASE + 3 个 SECTION。修改 tests/CMakeLists.txt 启用 BP_TEST_DOMAIN。测试覆盖：WAV/FLAC 文件信息验证、WAV/FLAC 全量解码帧数一致性、不存在文件错误处理、seekTo 越界保护与合法跳转。编译 0 错误 0 警告，全部 7 个测试用例通过（41 个断言），含 1 个 smoke test）。
 
 **开发者学习**：✅ 全部完成（C++、音频基础、JUCE、CMake、辅助库、Git，共 29 章，目录见 `项目规划/学习手册/00-目录与学习路线.md`）。
 
-**下一步**：2.2.14 编写单元测试（test_audio_decoder.cpp，6 个测试用例，使用 Catch2 框架）。2.2.9 三个 getter 已提前完成（2.2.7 端到端测试需要）。2.2.13 测试音频文件已准备完毕 ✅。2.2 阶段共 14 个子步骤（2.2.1 ✅ → 2.2.2 ✅ → 2.2.3 ✅ → 2.2.4 ✅ → 2.2.5 ✅ → 2.2.6 ✅ → 2.2.7 ✅ → 2.2.8 ✅ → 2.2.10 ✅ → 2.2.11 ✅ → 2.2.12 ✅ → 2.2.14），详见 `项目规划/项目进度.md`。
+**下一步**：2.3 独占模式（Hog Mode）实现。2.2.9 三个 getter 已提前完成（2.2.7 端到端测试需要）。2.2.13 测试音频文件已准备完毕 ✅。2.2 阶段全部完成（14/14 个子步骤：2.2.1 ✅ → 2.2.2 ✅ → 2.2.3 ✅ → 2.2.4 ✅ → 2.2.5 ✅ → 2.2.6 ✅ → 2.2.7 ✅ → 2.2.8 ✅ → 2.2.10 ✅ → 2.2.11 ✅ → 2.2.12 ✅ → 2.2.14 ✅），详见 `项目规划/项目进度.md`。
 
 **功能优先级**：P0 核心验证（CLI 验证 Float + Integer 双路径，证明 bit-perfect 可行）→ P1 基础播放器（带 UI 的 MVP）→ P2 音乐管理（曲库 + 数据库）→ P3 体验增强与发布 → P4 未来扩展（跨平台 + 高级功能）。详见 `项目规划/需求分析.md` 第二章。
 

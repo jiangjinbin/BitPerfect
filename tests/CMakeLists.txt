@@ -44,7 +44,12 @@ set(BP_TEST_INFRASTRUCTURE "")
 #     tests/domain/test_playlist.cpp                   # 播放列表管理测试
 #     tests/domain/test_metadata_parser.cpp            # 元数据解析测试
 # )
-set(BP_TEST_DOMAIN "")
+# 2.2.14 ✅ AudioDecoder 单元测试已启用
+# 注意：路径是相对于本 CMakeLists.txt 所在目录（tests/）的相对路径
+# 后续模块实现后，在下方列表中追加对应测试文件即可
+set(BP_TEST_DOMAIN
+    domain/test_audio_decoder.cpp
+)
 
 # --- 应用层测试 ---
 # 测试 Application Controller 和 Player Controller 的集成逻辑
